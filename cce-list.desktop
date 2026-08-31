@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CCE List
+Comment=Things to remember, kept on the desktop
+Exec=cce-list
+Icon=cce-list
+Categories=Utility;
+Terminal=false
+StartupWMClass=cce-list
