@@ -1,9 +1,10 @@
 //! `cce-list` — a small list of things to remember, kept on the desktop.
 //!
-//! A self-sizing UTILITY window (the compositor never dictates its size and
-//! persists it across sessions like any other window, so it stays parked
-//! wherever it is put). One `TextBox` adds items; a click on a row toggles it
-//! done; the ✕ that appears on hover deletes it. The list is a plain markdown
+//! A plain floating window: the compositor saves and restores it across
+//! sessions (position, size, and respawn) like any other app, and in overview
+//! mode it takes the normal move/resize ring. One `TextBox` adds items; a
+//! click on a row toggles it done; the ✕ that appears on hover deletes it.
+//! Rows scroll when they outgrow the window. The list is a plain markdown
 //! checklist on disk (`~/.local/share/cce-list/list.md`), so it can be read
 //! and edited with anything.
 
@@ -17,12 +18,14 @@ use cce_ui::widget::{
 use std::path::PathBuf;
 use wayland_client::QueueHandle;
 
-const WIDTH: u32 = 300;
+/// Initial size only — the window is freely resizable and the compositor
+/// restores the last geometry across sessions.
+const INIT_W: u32 = 300;
+const INIT_H: u32 = 320;
+/// Small enough that the title band, the input box, and one row stay usable.
+const MIN_SIZE: (u32, u32) = (220, 160);
 const ROW_H: f32 = 26.0;
 const INPUT_H: f32 = 30.0;
-const MIN_H: u32 = 140;
-/// Past this the window stops growing and the list scrolls instead.
-const MAX_H: u32 = 640;
 const TITLE_FONT_SIZE: f32 = 14.0;
 /// Checkbox disc radius; its hit target is the whole row, this is only drawn.
 const CHECK_R: f32 = 7.0;
@@ -155,7 +158,7 @@ struct ListApp {
     needs_rebuild: bool,
     widgets_registered: bool,
     /// How far the list is scrolled down, in logical px; non-zero only once
-    /// the window has hit [`MAX_H`] and the rows overflow it.
+    /// the rows overflow the window.
     scroll: f32,
     pointer: Option<(f32, f32)>,
     hovered_row: Option<usize>,
@@ -247,8 +250,8 @@ impl Application for ListApp {
             items: load_items(),
             input_box: TextBox::new(String::new()).with_placeholder("Remember to…"),
             ui_context: cce_ui::context::UiContext::new(),
-            width: WIDTH,
-            height: MIN_H,
+            width: INIT_W,
+            height: INIT_H,
             scale_factor: 1.0,
             needs_rebuild: true,
             widgets_registered: false,
@@ -262,27 +265,11 @@ impl Application for ListApp {
         WindowSettings {
             title: "cce-list".to_string(),
             app_id: "cce-list".to_string(),
-            width: WIDTH,
-            height: MIN_H,
+            width: INIT_W,
+            height: INIT_H,
             fullscreen: false,
-            min_size: None,
+            min_size: Some(MIN_SIZE),
         }
-    }
-
-    /// A tool whose shape is its contents: the compositor never sizes it and
-    /// never restores a stale geometry over what `desired_size` asks for.
-    fn utility(&self) -> bool {
-        true
-    }
-
-    /// Fixed width; height tracks the item count in whole-row steps until
-    /// [`MAX_H`], where the list starts scrolling instead.
-    fn desired_size(&self) -> Option<(u32, u32)> {
-        let m = metrics(WIDTH as f32);
-        // An empty list still shows one row's worth of hint text.
-        let rows = self.items.len().max(1) as f32;
-        let wanted = (m.list_top + rows * ROW_H + m.pad).ceil() as u32;
-        Some((WIDTH, wanted.clamp(MIN_H, MAX_H)))
     }
 
     fn update(&mut self, msg: Self::Message, _needs_rebuild: &mut bool, exit: &mut bool) {
