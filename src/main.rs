@@ -12,8 +12,8 @@ use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, Win
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx, PlateSpec};
 use cce_ui::widget::{
-    Adapted, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey, TextBox,
-    WidgetHost,
+    Adapted, Bounds, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey,
+    ScrollMotion, TextBox, WidgetHost,
 };
 use std::path::PathBuf;
 use wayland_client::QueueHandle;
@@ -158,8 +158,11 @@ struct ListApp {
     needs_rebuild: bool,
     widgets_registered: bool,
     /// How far the list is scrolled down, in logical px; non-zero only once
-    /// the rows overflow the window.
+    /// the rows overflow the window. The DRAWN offset — `scroll_motion`
+    /// glides it (wheel) or coasts it (trackpad flick); direct writes (End
+    /// key, clamp) are adopted by the motion on its next step.
     scroll: f32,
+    scroll_motion: ScrollMotion,
     pointer: Option<(f32, f32)>,
     hovered_row: Option<usize>,
 }
@@ -200,6 +203,29 @@ impl ListApp {
     fn clamp_scroll(&mut self) {
         let m = metrics(self.width as f32);
         self.scroll = self.scroll.clamp(0.0, self.max_scroll(&m));
+    }
+
+    /// Re-derive what depends on the drawn offset after it moved.
+    fn after_scroll_moved(&mut self) {
+        if let Some((px, py)) = self.pointer {
+            self.hovered_row = self.row_at(px, py);
+        }
+    }
+
+    /// Advance the wheel glide / flick coast; true while the offset moved.
+    fn tick_scroll(&mut self, dt: f32) -> bool {
+        self.scroll_motion.reconcile(0.0, self.scroll);
+        if !self.scroll_motion.is_animating() {
+            return false;
+        }
+        let m = metrics(self.width as f32);
+        let max = self.max_scroll(&m);
+        let moved = self.scroll_motion.tick(dt, Bounds::max(0.0), Bounds::max(max));
+        self.scroll = self.scroll_motion.y.pos();
+        if moved {
+            self.after_scroll_moved();
+        }
+        moved || self.scroll_motion.is_animating()
     }
 
     fn row_at(&self, x: f32, y: f32) -> Option<usize> {
@@ -256,6 +282,7 @@ impl Application for ListApp {
             needs_rebuild: true,
             widgets_registered: false,
             scroll: 0.0,
+            scroll_motion: ScrollMotion::new(),
             pointer: None,
             hovered_row: None,
         }
@@ -280,6 +307,10 @@ impl Application for ListApp {
 
     fn tick(&mut self, dt: f32, needs_rebuild: &mut bool) {
         if self.ui_context.tick(dt) {
+            *needs_rebuild = true;
+            self.needs_rebuild = true;
+        }
+        if self.tick_scroll(dt) {
             *needs_rebuild = true;
             self.needs_rebuild = true;
         }
@@ -512,20 +543,20 @@ impl Application for ListApp {
         needs_rebuild: &mut bool,
     ) {
         let m = metrics(self.width as f32);
-        if self.max_scroll(&m) <= 0.0 {
+        let max = self.max_scroll(&m);
+        if max <= 0.0 {
             return;
         }
-        let before = self.scroll;
-        self.scroll -= delta.notches_y() * ROW_H;
-        self.clamp_scroll();
-        if self.scroll != before {
-            if let Some((px, py)) = self.pointer {
-                self.hovered_row = self.row_at(px, py);
-            }
+        self.scroll_motion.reconcile(0.0, self.scroll);
+        let moved = self.scroll_motion.apply(delta, (ROW_H, ROW_H), Bounds::max(0.0), Bounds::max(max));
+        self.scroll = self.scroll_motion.y.pos();
+        if moved {
+            self.after_scroll_moved();
             self.needs_rebuild = true;
             *needs_rebuild = true;
         }
     }
+
 
     fn handle_key_input(
         &mut self,
