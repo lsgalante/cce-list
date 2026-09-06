@@ -1,0 +1,10 @@
+# One two-way sync pass between iCloud Reminders and cce-list's list.md
+# (see src/bin/sync.rs). Driven by cce-list-sync.timer; harmless to start by
+# hand. Failures (locked keyring, no network, iCloud down) exit nonzero and
+# the timer simply tries again next tick.
+[Unit]
+Description=Sync iCloud Reminders with cce-list
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/cce-list-sync

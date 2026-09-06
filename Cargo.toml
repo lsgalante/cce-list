@@ -9,3 +9,21 @@ calloop = "0.13.0"
 wayland-client = { version = "0.31", features = ["system"] }
 log = "0.4"
 env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# cce-list-sync only: CalDAV (VTODO) against iCloud Reminders, credentials
+# from the same keyring service cce-mail uses.
+reqwest = { version = "0.12", features = ["blocking"] }
+roxmltree = "0.20"
+chrono = "0.4"
+keyring = { version = "3", features = ["sync-secret-service"] }
+
+# The desktop checklist app; src/bin/sync.rs adds the cce-list-sync helper,
+# which ccebuild discovers via cargo metadata like any other [[bin]].
+[[bin]]
+name = "cce-list"
+path = "src/main.rs"
+
+[[bin]]
+name = "cce-list-sync"
+path = "src/bin/sync.rs"

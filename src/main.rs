@@ -6,8 +6,11 @@
 //! click on a row toggles it done; the ✕ that appears on hover deletes it.
 //! Rows scroll when they outgrow the window. The list is a plain markdown
 //! checklist on disk (`~/.local/share/cce-list/list.md`), so it can be read
-//! and edited with anything.
+//! and edited with anything. Items mirrored from iCloud Reminders by
+//! `cce-list-sync` carry a trailing `<!-- uid:… -->` comment; toggling or
+//! deleting them here is pushed to the server on the next sync tick.
 
+use cce_list::{load_items, save_items, Item};
 use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx, PlateSpec};
@@ -15,7 +18,6 @@ use cce_ui::widget::{
     Adapted, Bounds, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta, NamedKey,
     ScrollMotion, TextBox, WidgetHost,
 };
-use std::path::PathBuf;
 use wayland_client::QueueHandle;
 
 /// Initial size only — the window is freely resizable and the compositor
@@ -37,74 +39,12 @@ enum ListMessage {
     Exit,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Item {
-    text: String,
-    done: bool,
-}
+// Item, the markdown parse/serialize, and load/save live in the lib
+// (src/lib.rs), shared with the cce-list-sync helper.
 
-// ── Persistence: a markdown checklist ─────────────────────────────────────
-
-fn data_path() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")
-        })
-        .join("cce-list/list.md")
-}
-
-/// Checklist lines become items; any other non-empty line is adopted as a
-/// not-done item rather than parsed around — the next save rewrites the file,
-/// so a line this reader skipped would be a line silently deleted.
-fn parse_items(text: &str) -> Vec<Item> {
-    text.lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let (done, rest) = if let Some(r) = trimmed.strip_prefix("- [ ] ") {
-                (false, r)
-            } else if let Some(r) = trimmed.strip_prefix("- [x] ").or_else(|| trimmed.strip_prefix("- [X] ")) {
-                (true, r)
-            } else {
-                (false, trimmed)
-            };
-            Some(Item { text: rest.to_string(), done })
-        })
-        .collect()
-}
-
-fn serialize_items(items: &[Item]) -> String {
-    items
-        .iter()
-        .map(|i| format!("- [{}] {}\n", if i.done { 'x' } else { ' ' }, i.text))
-        .collect()
-}
-
-fn load_items() -> Vec<Item> {
-    match std::fs::read_to_string(data_path()) {
-        Ok(text) => parse_items(&text),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Write-temp-then-rename in the same directory, so a crash mid-write never
-/// leaves a truncated list behind.
-fn save_items(items: &[Item]) {
-    let path = data_path();
-    let write = || -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("md.tmp");
-        std::fs::write(&tmp, serialize_items(items))?;
-        std::fs::rename(&tmp, &path)
-    };
-    if let Err(e) = write() {
-        log::error!("cce-list: failed to save {}: {e}", path.display());
+fn save(items: &[Item]) {
+    if let Err(e) = save_items(items) {
+        log::error!("cce-list: failed to save list: {e}");
     }
 }
 
@@ -252,11 +192,11 @@ impl ListApp {
         if text.is_empty() {
             return;
         }
-        self.items.push(Item { text, done: false });
+        self.items.push(Item { text, done: false, uid: None });
         self.input_box.text.clear();
         self.input_box.edit_buffer.clear();
         self.input_box.cursor_idx = 0;
-        save_items(&self.items);
+        save(&self.items);
         // Keep the fresh item in view once the window is at its height cap.
         let m = metrics(self.width as f32);
         self.scroll = self.max_scroll(&m);
@@ -519,7 +459,7 @@ impl Application for ListApp {
                 } else {
                     self.items[i].done = !self.items[i].done;
                 }
-                save_items(&self.items);
+                save(&self.items);
                 self.needs_rebuild = true;
                 *needs_rebuild = true;
                 return None;
@@ -598,33 +538,4 @@ impl Application for ListApp {
 fn main() {
     env_logger::init();
     cce_ui::engine::run::<ListApp>();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn checklist_round_trips() {
-        let items = vec![
-            Item { text: "water the plants".into(), done: false },
-            Item { text: "renew passport".into(), done: true },
-        ];
-        assert_eq!(parse_items(&serialize_items(&items)), items);
-    }
-
-    /// A hand-edited file must survive a load/save cycle: plain lines are
-    /// adopted as items, not dropped, and `[X]` reads the same as `[x]`.
-    #[test]
-    fn foreign_lines_are_adopted_not_dropped() {
-        let parsed = parse_items("buy stamps\n- [X] call mom\n\n  - [ ] indented\n");
-        assert_eq!(
-            parsed,
-            vec![
-                Item { text: "buy stamps".into(), done: false },
-                Item { text: "call mom".into(), done: true },
-                Item { text: "indented".into(), done: false },
-            ]
-        );
-    }
 }

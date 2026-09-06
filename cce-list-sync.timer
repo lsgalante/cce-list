@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync iCloud Reminders with cce-list every 15 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+RandomizedDelaySec=90
+
+[Install]
+WantedBy=timers.target
