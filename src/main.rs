@@ -419,7 +419,7 @@ impl Application for ListApp {
     }
 
     /// Drag the window by its title band; everywhere else is content.
-    fn is_movable_backplate_at(&self, _px: f32, py: f32) -> bool {
+    fn is_movable_root_plate_at(&self, _px: f32, py: f32) -> bool {
         py <= metrics(self.width as f32).band_h
     }
 
