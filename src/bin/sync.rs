@@ -286,12 +286,17 @@ fn google_fetch(
                     continue;
                 }
                 let Some(id) = t["id"].as_str() else { continue };
-                let url = reqwest::Url::parse(&format!("{base}/{id}")).map_err(|e| e.to_string())?;
                 let summary = t["title"].as_str().unwrap_or("").trim().to_string();
+                // Google's apps mint blank placeholder tasks freely; a row
+                // with no text is nothing to remember, so leave them there.
+                if summary.is_empty() {
+                    continue;
+                }
+                let url = reqwest::Url::parse(&format!("{base}/{id}")).map_err(|e| e.to_string())?;
                 todos.insert(id.to_string(), RemoteTodo {
                     url,
                     etag: t["etag"].as_str().unwrap_or("").to_string(),
-                    summary: if summary.is_empty() { "(untitled)".to_string() } else { summary },
+                    summary,
                     done: t["status"].as_str() == Some("completed"),
                     lines: Vec::new(),
                 });
