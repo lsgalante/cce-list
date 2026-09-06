@@ -336,8 +336,10 @@ fn google_create(
     token: &str,
     target: &reqwest::Url,
     text: &str,
+    done: bool,
 ) -> Result<(String, reqwest::Url, String), String> {
-    let body = serde_json::json!({ "title": text, "status": "needsAction" });
+    let status = if done { "completed" } else { "needsAction" };
+    let body = serde_json::json!({ "title": text, "status": status });
     let resp = google_call(client, token, reqwest::Method::POST, target.as_str(), &[], Some(&body))?;
     let id = resp["id"].as_str().ok_or("created task has no id")?.to_string();
     let url = reqwest::Url::parse(&format!("{}/{id}", target.as_str().trim_end_matches('/')))
@@ -505,7 +507,10 @@ fn run_sync(backend: &Backend, dry_run: bool, force_deletes: bool) -> Result<(),
         }
     }
     let mut created: Vec<(String, String)> = Vec::new(); // (text, uid) to annotate
-    for text in &plan.push_creates {
+    for (text, done) in &plan.push_creates {
+        // A row checked off before it ever reached the server is created
+        // completed; recording that in the state is what keeps the next
+        // pass from seeing a phantom local change.
         let made = match (backend, &session) {
             (Backend::ICloud(acc), _) => {
                 let uid = new_uid();
@@ -514,12 +519,12 @@ fn run_sync(backend: &Backend, dry_run: bool, force_deletes: bool) -> Result<(),
                     .join(&format!("{uid}.ics"))
                     .map_err(|e| e.to_string())
                     .and_then(|url| {
-                        put_ics(&client, acc, &url, &new_vtodo(&uid, text, false), None)
+                        put_ics(&client, acc, &url, &new_vtodo(&uid, text, *done), None)
                             .map(|etag| (uid, url, etag))
                     })
             }
             (Backend::Google(_), Session::Google(token)) => {
-                google_create(&client, token, &remote.create_target, text)
+                google_create(&client, token, &remote.create_target, text, *done)
             }
             (Backend::Google(_), Session::ICloud) => unreachable!("session matches backend"),
         };
@@ -530,7 +535,7 @@ fn run_sync(backend: &Backend, dry_run: bool, force_deletes: bool) -> Result<(),
                     etag,
                     account: email.clone(),
                     text: text.clone(),
-                    done: false,
+                    done: *done,
                 });
                 created.push((text.clone(), uid));
             }
@@ -600,8 +605,8 @@ fn print_plan(plan: &Plan, remote: &BTreeMap<String, RemoteTodo>) {
     for uid in &plan.push_updates {
         println!("push change: {uid}");
     }
-    for text in &plan.push_creates {
-        println!("push new:    {text}");
+    for (text, done) in &plan.push_creates {
+        println!("push new:    {}{text}", if *done { "[x] " } else { "" });
     }
     for uid in &plan.push_deletes {
         println!("push delete: {uid}");
@@ -616,8 +621,8 @@ struct Plan {
     pull_updates: Vec<String>,
     pull_deletes: Vec<String>,
     push_updates: Vec<String>,
-    /// Texts of local uid-less rows to create server-side.
-    push_creates: Vec<String>,
+    /// (text, done) of local uid-less rows to create server-side.
+    push_creates: Vec<(String, bool)>,
     push_deletes: Vec<String>,
     /// Server etag moved but content is identical — track it, change nothing.
     refresh_etags: Vec<String>,
@@ -676,11 +681,11 @@ fn plan(local: &[Item], state: &SyncState, remote: &BTreeMap<String, RemoteTodo>
     }
     for item in local {
         match &item.uid {
-            None => plan.push_creates.push(item.text.clone()),
+            None => plan.push_creates.push((item.text.clone(), item.done)),
             // A uid the server never heard of and the state does not track:
             // recreate it under that uid rather than orphaning the row.
             Some(uid) if !remote.contains_key(uid) && !state.items.contains_key(uid) => {
-                plan.push_creates.push(item.text.clone());
+                plan.push_creates.push((item.text.clone(), item.done));
             }
             Some(_) => {}
         }
@@ -1236,7 +1241,7 @@ mod tests {
         assert_eq!(p.pull_updates, vec!["u3"]);
         assert_eq!(p.push_deletes, vec!["u4"]);
         assert_eq!(p.pull_new, vec!["u5"]);
-        assert_eq!(p.push_creates, vec!["fresh local"]);
+        assert_eq!(p.push_creates, vec![("fresh local".to_string(), false)]);
         assert!(p.pull_deletes.is_empty());
     }
 
