@@ -1,33 +1,46 @@
-//! `cce-list-sync` — two-way sync between iCloud Reminders and cce-list's
+//! `cce-list-sync` — two-way sync between a remote task list and cce-list's
 //! markdown checklist.
 //!
-//! Accounts and credentials are cce-mail's (accounts.json + the "cce-mail"
-//! keyring service); Reminders lists are the VTODO calendars on
-//! caldav.icloud.com, reached the same way cce-calendar-sync reaches the
-//! event calendars. The discovery/DAV code is deliberately duplicated from
-//! that helper rather than extracted: every crate builds standalone
-//! (multi-repo), and two copies of ~100 lines beats a new published crate
-//! until a third consumer exists.
+//! Accounts are cce-mail's (accounts.json, owned by cce-system-interface).
+//! Two backends, one of which is chosen per run (`--backend google|icloud`;
+//! default Google when an OAuth account exists, else iCloud):
+//!
+//! - **Google Tasks**, over its REST API with the OAuth tokens the settings
+//!   app's Google sign-in stores (it requests the `tasks` scope). The
+//!   access token is refreshed in memory each run, never written back. This
+//!   is the backend that reaches the phone.
+//! - **iCloud Reminders**, over CalDAV VTODO with the "cce-mail" keyring
+//!   password. Kept working but unlikely to be useful: an account whose
+//!   Reminders were "upgraded" (CloudKit) exposes only Apple's legacy stub
+//!   list over CalDAV, invisible to the Reminders app.
+//!
+//! The DAV discovery code is deliberately duplicated from cce-calendar-sync
+//! rather than extracted: every crate builds standalone (multi-repo), and
+//! two copies of ~100 lines beats a new published crate until a third
+//! consumer exists.
 //!
 //! The merge is three-way against `sync-state.json`, the last-synced server
 //! snapshot per uid: a difference between the list and the state is a local
 //! edit to push; between the server and the state, a remote edit to pull;
 //! both changed → local wins (the next tick reconciles). Deletions propagate
 //! both ways, guarded: a missing list.md re-imports instead of deleting, and
-//! a run that would delete most tracked reminders (>5 and >50%) refuses
-//! without `--force-deletes` — a mangled file must not empty the phone.
+//! a run that would delete most tracked items (>5 and >50%) refuses without
+//! `--force-deletes` — a mangled file must not empty the phone. State
+//! entries record their account, so a run only reasons about its own
+//! backend's items; rows another backend owns pass through untouched.
 //!
-//! Pushes PATCH the fetched iCalendar rather than rebuilding it, so due
-//! dates, notes, and alarms Apple attached survive a checkbox toggle.
-//! Recurring reminders (RRULE) are skipped entirely — completing one means
-//! "advance to the next occurrence", which this checkbox model cannot say.
-//! Server-side completed reminders that were never tracked are not imported
+//! CalDAV pushes PATCH the fetched iCalendar rather than rebuilding it, so
+//! due dates, notes, and alarms Apple attached survive a checkbox toggle;
+//! Google pushes are field-level PATCHes for the same reason. Recurring
+//! reminders (RRULE) are skipped entirely — completing one means "advance
+//! to the next occurrence", which this checkbox model cannot say.
+//! Server-side completed items that were never tracked are not imported
 //! (years of checked-off junk stays on the phone).
 //!
-//! Usage: `cce-list-sync [--dry-run] [--force-deletes]`. Driven by
-//! cce-list-sync.timer; harmless to run by hand.
+//! Usage: `cce-list-sync [--dry-run] [--force-deletes] [--backend google|icloud]`.
+//! Driven by cce-list-sync.timer; harmless to run by hand.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cce_list::{
     atomic_write, data_path, load_sync_state, parse_items, save_sync_state, serialize_items,
@@ -44,25 +57,299 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dry_run = args.iter().any(|a| a == "--dry-run");
     let force_deletes = args.iter().any(|a| a == "--force-deletes");
+    let wanted = args
+        .iter()
+        .position(|a| a == "--backend")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.to_ascii_lowercase());
 
-    let accounts = match icloud_accounts() {
-        Ok(a) => a,
+    let backend = match choose_backend(wanted.as_deref()) {
+        Ok(Some(b)) => b,
+        Ok(None) => {
+            log::info!("no usable account in accounts.json; nothing to sync");
+            return;
+        }
         Err(e) => {
             log::error!("cannot read accounts: {e}");
             std::process::exit(1);
         }
     };
-    let Some(acc) = accounts.into_iter().next() else {
-        log::info!("no iCloud account in accounts.json; nothing to sync");
-        return;
-    };
 
-    match run_sync(&acc, dry_run, force_deletes) {
+    match run_sync(&backend, dry_run, force_deletes) {
         Ok(()) => {}
         Err(e) => {
-            log::error!("{}: sync failed: {e}", acc.email);
+            log::error!("{}: sync failed: {e}", backend.email());
             std::process::exit(1);
         }
+    }
+}
+
+enum Backend {
+    ICloud(Account),
+    Google(GoogleAccount),
+}
+
+impl Backend {
+    fn email(&self) -> &str {
+        match self {
+            Backend::ICloud(a) => &a.email,
+            Backend::Google(a) => &a.email,
+        }
+    }
+}
+
+fn choose_backend(wanted: Option<&str>) -> Result<Option<Backend>, String> {
+    match wanted {
+        Some("icloud") => Ok(icloud_accounts()?.into_iter().next().map(Backend::ICloud)),
+        Some("google") => Ok(google_accounts()?.into_iter().next().map(Backend::Google)),
+        Some(other) => Err(format!("unknown --backend {other:?} (google|icloud)")),
+        None => {
+            if let Some(g) = google_accounts()?.into_iter().next() {
+                return Ok(Some(Backend::Google(g)));
+            }
+            Ok(icloud_accounts()?.into_iter().next().map(Backend::ICloud))
+        }
+    }
+}
+
+/// Per-run credentials the pushes need beyond the account itself.
+enum Session {
+    ICloud,
+    Google(String),
+}
+
+// ── Google Tasks ──────────────────────────────────────────────────────────
+
+const TASKS_API: &str = "https://tasks.googleapis.com/tasks/v1";
+
+struct GoogleAccount {
+    email: String,
+    refresh_token: String,
+    client_id: String,
+    client_secret: String,
+}
+
+/// The OAuth fields the settings app's Google sign-in writes.
+#[derive(serde::Deserialize)]
+struct OAuthOnDisk {
+    email: String,
+    #[serde(default)]
+    is_oauth: bool,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    client_id: Option<String>,
+    #[serde(default)]
+    client_secret: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct GoogleClientConfig {
+    #[serde(default)]
+    client_id: String,
+    #[serde(default)]
+    client_secret: String,
+}
+
+fn google_accounts() -> Result<Vec<GoogleAccount>, String> {
+    let dir = cce_ui::config::cce_config_dir();
+    let path = dir.join("accounts.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let on_disk: Vec<OAuthOnDisk> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    // An account without its own pinned client credentials falls back to
+    // the global template the settings app maintains.
+    let template: GoogleClientConfig = std::fs::read_to_string(dir.join("google_client.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for acc in on_disk {
+        if !acc.is_oauth {
+            continue;
+        }
+        let Some(refresh_token) = acc.refresh_token.filter(|t| !t.is_empty()) else {
+            log::warn!("{}: OAuth account without a refresh token; sign in again", acc.email);
+            continue;
+        };
+        out.push(GoogleAccount {
+            email: acc.email,
+            refresh_token,
+            client_id: acc.client_id.filter(|s| !s.is_empty()).unwrap_or(template.client_id.clone()),
+            client_secret: acc
+                .client_secret
+                .filter(|s| !s.is_empty())
+                .unwrap_or(template.client_secret.clone()),
+        });
+    }
+    Ok(out)
+}
+
+/// A fresh access token from the refresh grant. Tokens last an hour and a
+/// tick is one request burst, so refreshing every run is simpler than
+/// tracking expiry — and keeps this helper from writing accounts.json.
+fn google_access_token(
+    client: &reqwest::blocking::Client,
+    acc: &GoogleAccount,
+) -> Result<String, String> {
+    let resp = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("client_id", acc.client_id.as_str()),
+            ("client_secret", acc.client_secret.as_str()),
+            ("refresh_token", acc.refresh_token.as_str()),
+            ("grant_type", "refresh_token"),
+        ])
+        .send()
+        .map_err(|e| format!("token refresh: {e}"))?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().map_err(|e| format!("token refresh: {e}"))?;
+    if !status.is_success() {
+        // invalid_grant here means the refresh token was revoked or the
+        // consent predates the tasks scope — a re-login fixes both.
+        return Err(format!("token refresh: HTTP {status} {body}"));
+    }
+    body.get("access_token")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| "token refresh: no access_token in response".to_string())
+}
+
+fn google_call(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    method: reqwest::Method,
+    url: &str,
+    query: &[(&str, &str)],
+    body: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+    let mut req = client.request(method.clone(), url).bearer_auth(token).query(query);
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req.send().map_err(|e| format!("{method} {url}: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(serde_json::Value::Null);
+    }
+    let text = resp.text().map_err(|e| format!("{method} {url}: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("{method} {url}: HTTP {status} {text}"));
+    }
+    if text.trim().is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    serde_json::from_str(&text).map_err(|e| format!("{method} {url}: bad JSON: {e}"))
+}
+
+/// Every task in every list; the default list is where creates go.
+fn google_fetch(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    email: &str,
+) -> Result<RemoteSnapshot, String> {
+    let get = |url: &str, q: &[(&str, &str)]| {
+        google_call(client, token, reqwest::Method::GET, url, q, None)
+    };
+    let default = get(&format!("{TASKS_API}/users/@me/lists/@default"), &[])?;
+    let default_id = default["id"].as_str().ok_or("default task list has no id")?.to_string();
+    let lists = get(&format!("{TASKS_API}/users/@me/lists"), &[("maxResults", "100")])?;
+    let lists: Vec<(String, String)> = lists["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|l| Some((l["id"].as_str()?.to_string(), l["title"].as_str().unwrap_or("?").to_string())))
+        .collect();
+    log::info!(
+        "{email}: {} task list(s), new items go to {}",
+        lists.len(),
+        lists.iter().find(|(id, _)| *id == default_id).map(|(_, t)| t.as_str()).unwrap_or("default")
+    );
+
+    let mut todos = BTreeMap::new();
+    for (list_id, title) in &lists {
+        let base = format!("{TASKS_API}/lists/{list_id}/tasks");
+        let mut page_token = String::new();
+        loop {
+            let mut q = vec![
+                ("showCompleted", "true"),
+                ("showHidden", "true"),
+                ("maxResults", "100"),
+                ("fields", "nextPageToken,items(id,title,status,etag,deleted)"),
+            ];
+            if !page_token.is_empty() {
+                q.push(("pageToken", page_token.as_str()));
+            }
+            let page = get(&base, &q).map_err(|e| format!("list {title}: {e}"))?;
+            for t in page["items"].as_array().into_iter().flatten() {
+                if t["deleted"].as_bool().unwrap_or(false) {
+                    continue;
+                }
+                let Some(id) = t["id"].as_str() else { continue };
+                let url = reqwest::Url::parse(&format!("{base}/{id}")).map_err(|e| e.to_string())?;
+                let summary = t["title"].as_str().unwrap_or("").trim().to_string();
+                todos.insert(id.to_string(), RemoteTodo {
+                    url,
+                    etag: t["etag"].as_str().unwrap_or("").to_string(),
+                    summary: if summary.is_empty() { "(untitled)".to_string() } else { summary },
+                    done: t["status"].as_str() == Some("completed"),
+                    lines: Vec::new(),
+                });
+            }
+            match page["nextPageToken"].as_str() {
+                Some(next) if !next.is_empty() => page_token = next.to_string(),
+                _ => break,
+            }
+        }
+    }
+    let create_target = reqwest::Url::parse(&format!("{TASKS_API}/lists/{default_id}/tasks"))
+        .map_err(|e| e.to_string())?;
+    Ok(RemoteSnapshot { todos, create_target })
+}
+
+/// Field-level PATCH: title and status only, so due dates and notes set in
+/// Google's own apps ride through. Un-completing must also clear the
+/// completion timestamp or the API rejects the status.
+fn google_update(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    url: &reqwest::Url,
+    text: &str,
+    done: bool,
+) -> Result<String, String> {
+    let body = if done {
+        serde_json::json!({ "title": text, "status": "completed" })
+    } else {
+        serde_json::json!({ "title": text, "status": "needsAction", "completed": null })
+    };
+    let resp = google_call(client, token, reqwest::Method::PATCH, url.as_str(), &[], Some(&body))?;
+    Ok(resp["etag"].as_str().unwrap_or("").to_string())
+}
+
+fn google_create(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    target: &reqwest::Url,
+    text: &str,
+) -> Result<(String, reqwest::Url, String), String> {
+    let body = serde_json::json!({ "title": text, "status": "needsAction" });
+    let resp = google_call(client, token, reqwest::Method::POST, target.as_str(), &[], Some(&body))?;
+    let id = resp["id"].as_str().ok_or("created task has no id")?.to_string();
+    let url = reqwest::Url::parse(&format!("{}/{id}", target.as_str().trim_end_matches('/')))
+        .map_err(|e| e.to_string())?;
+    Ok((id, url, resp["etag"].as_str().unwrap_or("").to_string()))
+}
+
+fn google_delete(
+    client: &reqwest::blocking::Client,
+    token: &str,
+    url: &reqwest::Url,
+) -> Result<(), String> {
+    match google_call(client, token, reqwest::Method::DELETE, url.as_str(), &[], None) {
+        Ok(_) => Ok(()),
+        // Already gone counts as done.
+        Err(e) if e.contains("HTTP 404") => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -112,15 +399,16 @@ fn icloud_accounts() -> Result<Vec<Account>, String> {
 
 // ── The pass ──────────────────────────────────────────────────────────────
 
-fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), String> {
+fn run_sync(backend: &Backend, dry_run: bool, force_deletes: bool) -> Result<(), String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|e| e.to_string())?;
+    let email = backend.email().to_string();
 
     // Read the list first: if it is unreadable there is nothing safe to do.
     let list_exists = data_path().exists();
-    let local = if list_exists {
+    let local_all = if list_exists {
         parse_items(&std::fs::read_to_string(data_path()).map_err(|e| e.to_string())?)
     } else {
         Vec::new()
@@ -133,22 +421,44 @@ fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), Str
         state = SyncState::default();
     }
 
-    let remote = fetch_remote(&client, acc)?;
-    let plan = plan(&local, &state, &remote.todos);
+    // This run reasons only about its own account: the state entries it
+    // owns, and the local rows not claimed by some other account's entry.
+    let foreign: BTreeSet<&str> = state
+        .items
+        .iter()
+        .filter(|(_, v)| v.account != email)
+        .map(|(k, _)| k.as_str())
+        .collect();
+    let local: Vec<Item> = local_all
+        .iter()
+        .filter(|i| i.uid.as_deref().is_none_or(|u| !foreign.contains(u)))
+        .cloned()
+        .collect();
+    let mine = SyncState {
+        items: state.items.iter().filter(|(_, v)| v.account == email).map(|(k, v)| (k.clone(), v.clone())).collect(),
+    };
 
-    if !force_deletes && plan.push_deletes.len() > 5 && plan.push_deletes.len() * 2 > state.items.len()
+    let (remote, session) = match backend {
+        Backend::ICloud(acc) => (fetch_remote(&client, acc)?, Session::ICloud),
+        Backend::Google(acc) => {
+            let token = google_access_token(&client, acc)?;
+            (google_fetch(&client, &token, &acc.email)?, Session::Google(token))
+        }
+    };
+    let plan = plan(&local, &mine, &remote.todos);
+
+    if !force_deletes && plan.push_deletes.len() > 5 && plan.push_deletes.len() * 2 > mine.items.len()
     {
         return Err(format!(
-            "refusing to delete {} of {} tracked reminders on the server — if the list \
+            "refusing to delete {} of {} tracked items on the server — if the list \
              was really emptied on purpose, run cce-list-sync --force-deletes",
             plan.push_deletes.len(),
-            state.items.len()
+            mine.items.len()
         ));
     }
 
     log::info!(
-        "{}: pull {} new / {} changed / {} deleted; push {} changed / {} new / {} deleted",
-        acc.email,
+        "{email}: pull {} new / {} changed / {} deleted; push {} changed / {} new / {} deleted",
         plan.pull_new.len(),
         plan.pull_updates.len(),
         plan.pull_deletes.len(),
@@ -166,13 +476,22 @@ fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), Str
     for uid in &plan.push_updates {
         let todo = &remote.todos[uid];
         let item = local.iter().find(|i| i.uid.as_deref() == Some(uid)).expect("planned");
-        let body = patch_vtodo(&todo.lines, &item.text, item.done);
-        match put_ics(&client, acc, &todo.url, &body, Some(&todo.etag)) {
+        let pushed = match (backend, &session) {
+            (Backend::ICloud(acc), _) => {
+                let body = patch_vtodo(&todo.lines, &item.text, item.done);
+                put_ics(&client, acc, &todo.url, &body, Some(&todo.etag))
+            }
+            (Backend::Google(_), Session::Google(token)) => {
+                google_update(&client, token, &todo.url, &item.text, item.done)
+            }
+            (Backend::Google(_), Session::ICloud) => unreachable!("session matches backend"),
+        };
+        match pushed {
             Ok(etag) => {
                 state.items.insert(uid.clone(), SyncedItem {
                     url: todo.url.to_string(),
                     etag,
-                    account: acc.email.clone(),
+                    account: email.clone(),
                     text: item.text.clone(),
                     done: item.done,
                 });
@@ -182,18 +501,29 @@ fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), Str
     }
     let mut created: Vec<(String, String)> = Vec::new(); // (text, uid) to annotate
     for text in &plan.push_creates {
-        let uid = new_uid();
-        let url = remote
-            .create_target
-            .join(&format!("{uid}.ics"))
-            .map_err(|e| e.to_string())?;
-        let body = new_vtodo(&uid, text, false);
-        match put_ics(&client, acc, &url, &body, None) {
-            Ok(etag) => {
+        let made = match (backend, &session) {
+            (Backend::ICloud(acc), _) => {
+                let uid = new_uid();
+                remote
+                    .create_target
+                    .join(&format!("{uid}.ics"))
+                    .map_err(|e| e.to_string())
+                    .and_then(|url| {
+                        put_ics(&client, acc, &url, &new_vtodo(&uid, text, false), None)
+                            .map(|etag| (uid, url, etag))
+                    })
+            }
+            (Backend::Google(_), Session::Google(token)) => {
+                google_create(&client, token, &remote.create_target, text)
+            }
+            (Backend::Google(_), Session::ICloud) => unreachable!("session matches backend"),
+        };
+        match made {
+            Ok((uid, url, etag)) => {
                 state.items.insert(uid.clone(), SyncedItem {
                     url: url.to_string(),
                     etag,
-                    account: acc.email.clone(),
+                    account: email.clone(),
                     text: text.clone(),
                     done: false,
                 });
@@ -205,7 +535,12 @@ fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), Str
     for uid in &plan.push_deletes {
         let entry = &state.items[uid];
         let url = reqwest::Url::parse(&entry.url).map_err(|e| e.to_string())?;
-        match delete_ics(&client, acc, &url, &entry.etag) {
+        let gone = match (backend, &session) {
+            (Backend::ICloud(acc), _) => delete_ics(&client, acc, &url, &entry.etag),
+            (Backend::Google(_), Session::Google(token)) => google_delete(&client, token, &url),
+            (Backend::Google(_), Session::ICloud) => unreachable!("session matches backend"),
+        };
+        match gone {
             Ok(()) => {
                 state.items.remove(uid);
             }
@@ -219,7 +554,7 @@ fn run_sync(acc: &Account, dry_run: bool, force_deletes: bool) -> Result<(), Str
         state.items.insert(uid.clone(), SyncedItem {
             url: todo.url.to_string(),
             etag: todo.etag.clone(),
-            account: acc.email.clone(),
+            account: email.clone(),
             text: todo.summary.clone(),
             done: todo.done,
         });
