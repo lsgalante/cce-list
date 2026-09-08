@@ -1,17 +1,22 @@
 //! Shared between the `cce-list` app and the `cce-list-sync` helper: the
-//! item model, the markdown checklist on disk, and the sync-state sidecar.
+//! item model, the markdown checklists on disk, and the sync-state sidecar.
 //!
-//! The list stays a plain markdown checklist (`~/.local/share/cce-list/
-//! list.md`), readable and editable with anything. Items mirrored from a
-//! server carry their identity as a trailing HTML comment —
-//! `- [ ] call mom <!-- uid:ABC-123 -->` — which markdown renderers hide and
-//! hand-editors can ignore (or delete, which reads as "delete and recreate").
-//! Everything else the sync needs (etags, item URLs, the last-synced
-//! snapshot) lives in `sync-state.json` next to the list, never in the
-//! markdown.
+//! Lists are plain markdown checklists, one file per list under
+//! `~/.local/share/cce-list/lists/<title>.md`, readable and editable with
+//! anything. The file's stem is the list's title. A list mirrored from a
+//! server carries its identity as a first-line HTML comment —
+//! `<!-- list:MDM5… -->` — and each mirrored item as a trailing one —
+//! `- [ ] call mom <!-- uid:ABC-123 -->`; markdown renderers hide both and
+//! hand-editors can ignore them (deleting one reads as "delete and
+//! recreate"). Which list the app shows is a one-line `current` file next
+//! to `lists/`. Everything else the sync needs (etags, item URLs, the
+//! last-synced snapshot) lives in `sync-state.json`, never in the markdown.
+//!
+//! Before lists existed there was a single `list.md`; `load_lists` migrates
+//! it on first sight (see [`migrate_legacy`]).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -21,15 +26,15 @@ pub struct Item {
     pub uid: Option<String>,
 }
 
-pub fn data_path() -> PathBuf {
-    data_dir().join("list.md")
+/// One checklist: its file stem, its server identity (if mirrored), items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListFile {
+    pub title: String,
+    pub id: Option<String>,
+    pub items: Vec<Item>,
 }
 
-pub fn sync_state_path() -> PathBuf {
-    data_dir().join("sync-state.json")
-}
-
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
@@ -38,6 +43,37 @@ fn data_dir() -> PathBuf {
         })
         .join("cce-list")
 }
+
+pub fn lists_dir() -> PathBuf {
+    data_dir().join("lists")
+}
+
+/// The pre-lists single checklist; only read by the migration.
+pub fn legacy_path() -> PathBuf {
+    data_dir().join("list.md")
+}
+
+pub fn current_path() -> PathBuf {
+    data_dir().join("current")
+}
+
+pub fn sync_state_path() -> PathBuf {
+    data_dir().join("sync-state.json")
+}
+
+/// A title as a file stem. `/` is the one character a stem cannot hold; a
+/// server title carrying one comes back to the server renamed, which is the
+/// lesser evil next to a list that cannot be written at all.
+pub fn safe_title(title: &str) -> String {
+    let t: String = title.trim().replace('/', "-");
+    if t.is_empty() || t == "." || t == ".." { "Untitled".to_string() } else { t }
+}
+
+pub fn list_path(title: &str) -> PathBuf {
+    lists_dir().join(format!("{}.md", safe_title(title)))
+}
+
+// ── Markdown ──────────────────────────────────────────────────────────────
 
 /// Checklist lines become items; any other non-empty line is adopted as a
 /// not-done item rather than parsed around — the next save rewrites the file,
@@ -91,26 +127,152 @@ pub fn serialize_items(items: &[Item]) -> String {
         .collect()
 }
 
-pub fn load_items() -> Vec<Item> {
-    match std::fs::read_to_string(data_path()) {
-        Ok(text) => parse_items(&text),
-        Err(_) => Vec::new(),
+/// A whole list file: the optional `<!-- list:ID -->` header, then items.
+pub fn parse_list(text: &str) -> (Option<String>, Vec<Item>) {
+    let mut lines = text.lines();
+    let mut first = lines.next();
+    while matches!(first, Some(l) if l.trim().is_empty()) {
+        first = lines.next();
     }
+    if let Some(id) = first
+        .map(str::trim)
+        .and_then(|l| l.strip_prefix("<!-- list:"))
+        .and_then(|l| l.strip_suffix("-->"))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        let rest: Vec<&str> = lines.collect();
+        return (Some(id.to_string()), parse_items(&rest.join("\n")));
+    }
+    (None, parse_items(text))
+}
+
+pub fn serialize_list(id: Option<&str>, items: &[Item]) -> String {
+    let mut out = String::new();
+    if let Some(id) = id {
+        out.push_str(&format!("<!-- list:{id} -->\n"));
+    }
+    out.push_str(&serialize_items(items));
+    out
+}
+
+// ── Files ─────────────────────────────────────────────────────────────────
+
+/// Every list on disk, titles sorted case-insensitively. Runs the legacy
+/// migration first, so a pre-lists install comes up with its old checklist
+/// intact rather than empty.
+pub fn load_lists() -> std::io::Result<Vec<ListFile>> {
+    migrate_legacy()?;
+    let dir = lists_dir();
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(e),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Some(title) = path.file_stem().and_then(|s| s.to_str()).map(String::from) else {
+            continue;
+        };
+        let text = std::fs::read_to_string(&path)?;
+        let (id, items) = parse_list(&text);
+        out.push(ListFile { title, id, items });
+    }
+    out.sort_by_key(|l| l.title.to_lowercase());
+    Ok(out)
+}
+
+pub fn load_list(title: &str) -> std::io::Result<ListFile> {
+    let text = std::fs::read_to_string(list_path(title))?;
+    let (id, items) = parse_list(&text);
+    Ok(ListFile { title: safe_title(title), id, items })
 }
 
 /// Write-temp-then-rename in the same directory, so a crash mid-write never
 /// leaves a truncated list behind.
-pub fn save_items(items: &[Item]) -> std::io::Result<()> {
-    atomic_write(&data_path(), &serialize_items(items))
+pub fn save_list(list: &ListFile) -> std::io::Result<()> {
+    atomic_write(&list_path(&list.title), &serialize_list(list.id.as_deref(), &list.items))
 }
 
-pub fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+pub fn delete_list(title: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(list_path(title)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        r => r,
+    }
+}
+
+pub fn rename_list(old: &str, new: &str) -> std::io::Result<()> {
+    let (from, to) = (list_path(old), list_path(new));
+    if from == to {
+        return Ok(());
+    }
+    std::fs::rename(from, to)
+}
+
+pub fn load_current() -> Option<String> {
+    std::fs::read_to_string(current_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn save_current(title: &str) -> std::io::Result<()> {
+    atomic_write(&current_path(), &format!("{}\n", safe_title(title)))
+}
+
+pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)
+}
+
+/// `list.md` → `lists/…`, once. The single checklist used to mirror EVERY
+/// server list flat, so its rows are split by the list the sync state says
+/// each belongs to: the biggest group becomes `Tasks.md`, any other group a
+/// file named by its list id — both carrying that id in the header, so the
+/// next sync recognises them as those lists and renames the files to the
+/// server's titles instead of creating new lists on the phone. Rows the
+/// state does not know (typed locally, never synced) go with the biggest
+/// group. The old file is kept as `list.md.migrated`.
+pub fn migrate_legacy() -> std::io::Result<()> {
+    let legacy = legacy_path();
+    if lists_dir().exists() || !legacy.exists() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(&legacy)?;
+    let items = parse_items(&text);
+    let state = load_sync_state().unwrap_or_default();
+    let majority = state.majority_list_id();
+    let mut groups: BTreeMap<Option<String>, Vec<Item>> = BTreeMap::new();
+    for item in items {
+        let owner = item
+            .uid
+            .as_deref()
+            .and_then(|u| state.items.get(u))
+            .map(|s| s.list_id())
+            .filter(|id| !id.is_empty())
+            .or_else(|| majority.clone());
+        groups.entry(owner).or_default().push(item);
+    }
+    if groups.is_empty() {
+        groups.insert(majority.clone(), Vec::new());
+    }
+    for (id, items) in groups {
+        let title = match (&id, &majority) {
+            (Some(i), Some(m)) if i != m => safe_title(i),
+            _ => "Tasks".to_string(),
+        };
+        save_list(&ListFile { title, id, items })?;
+    }
+    save_current("Tasks")?;
+    std::fs::rename(&legacy, legacy.with_extension("md.migrated"))
 }
 
 // ── Sync state (cce-list-sync's merge base; the app never touches it) ─────
@@ -129,12 +291,67 @@ pub struct SyncedItem {
     pub account: String,
     pub text: String,
     pub done: bool,
+    /// The server list the item belongs to. Older state files lack it; see
+    /// [`SyncedItem::list_id`], which falls back to reading the URL.
+    #[serde(default)]
+    pub list: String,
+}
+
+impl SyncedItem {
+    /// Google task URLs are `…/lists/{id}/tasks/{task}`; CalDAV item URLs
+    /// are `<calendar>/<uid>.ics`, where the calendar URL is the list id.
+    pub fn list_id(&self) -> String {
+        if !self.list.is_empty() {
+            return self.list.clone();
+        }
+        list_id_from_url(&self.url)
+    }
+}
+
+pub fn list_id_from_url(url: &str) -> String {
+    if let Some(rest) = url.split("/lists/").nth(1) {
+        if let Some(id) = rest.split("/tasks").next() {
+            return id.to_string();
+        }
+    }
+    match url.rfind('/') {
+        Some(i) => url[..=i].to_string(),
+        None => String::new(),
+    }
+}
+
+/// A server list as last synced: its title then, so a rename on either
+/// side is told apart from the other.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SyncedList {
+    pub title: String,
+    #[serde(default)]
+    pub etag: String,
+    pub account: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SyncState {
     #[serde(default)]
     pub items: BTreeMap<String, SyncedItem>,
+    /// Keyed by server list id.
+    #[serde(default)]
+    pub lists: BTreeMap<String, SyncedList>,
+}
+
+impl SyncState {
+    /// The list most tracked items belong to — what the legacy single
+    /// checklist "was", for the migration.
+    pub fn majority_list_id(&self) -> Option<String> {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for item in self.items.values() {
+            let id = item.list_id();
+            if !id.is_empty() {
+                *counts.entry(id).or_default() += 1;
+            }
+        }
+        counts.into_iter().max_by_key(|(_, n)| *n).map(|(id, _)| id)
+    }
 }
 
 pub fn load_sync_state() -> std::io::Result<SyncState> {
@@ -189,4 +406,36 @@ mod tests {
         assert_eq!(parsed[1].uid, None);
         assert_eq!(parsed[1].text, "literal <!-- not a uid -->");
     }
+
+    #[test]
+    fn list_header_round_trips_and_is_optional() {
+        let items = vec![Item { text: "a".into(), done: false, uid: None }];
+        let text = serialize_list(Some("MDM5"), &items);
+        assert_eq!(parse_list(&text), (Some("MDM5".into()), items.clone()));
+        // No header: a hand-made file is a local-only list, first line and all.
+        assert_eq!(parse_list("- [ ] a\n"), (None, items));
+        // A header that is not `list:` is just an adopted line.
+        let (id, adopted) = parse_list("<!-- note -->\n- [ ] a\n");
+        assert_eq!(id, None);
+        assert_eq!(adopted.len(), 2);
+    }
+
+    #[test]
+    fn list_ids_come_from_urls_when_the_state_predates_them() {
+        assert_eq!(
+            list_id_from_url("https://tasks.googleapis.com/tasks/v1/lists/MDM5/tasks/abc"),
+            "MDM5"
+        );
+        assert_eq!(
+            list_id_from_url("https://p1-caldav.icloud.com/1/calendars/reminders/X.ics"),
+            "https://p1-caldav.icloud.com/1/calendars/reminders/"
+        );
+    }
+
+    #[test]
+    fn titles_become_safe_stems() {
+        assert_eq!(safe_title("Home/Garden"), "Home-Garden");
+        assert_eq!(safe_title("  "), "Untitled");
+    }
 }
+
