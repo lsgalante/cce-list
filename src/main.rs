@@ -30,7 +30,8 @@ const ROW_H: f32 = 26.0;
 const INPUT_H: f32 = 30.0;
 const TITLE_FONT_SIZE: f32 = 14.0;
 /// Checkbox disc radius; its hit target is the whole row, this is only drawn.
-const CHECK_R: f32 = 7.0;
+/// The mark itself is cce-ui's round `Checkbox` style, so it matches one.
+const CHECK_R: f32 = cce_ui::widget::Checkbox::ROUND_RADIUS;
 /// Side of the ✕ delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
 
@@ -343,21 +344,7 @@ impl Application for ListApp {
                 }
                 let hovered = self.hovered_row == Some(i);
                 let (cx, cy) = (r.x + CHECK_R, r.y + r.height / 2.0);
-                pc.border(
-                    Rect {
-                        x: cx - CHECK_R,
-                        y: cy - CHECK_R,
-                        width: 2.0 * CHECK_R,
-                        height: 2.0 * CHECK_R,
-                    },
-                    (CHECK_R, CHECK_R, CHECK_R, CHECK_R),
-                    [0.0, 0.0, 0.0, 0.0],
-                    cce_ui::colors::TEXT_DIM,
-                    1.5,
-                );
-                if item.done {
-                    pc.circle(cx, cy, CHECK_R - 3.0, cce_ui::colors::TOGGLE_ON);
-                }
+                cce_ui::widget::Checkbox::paint_round_mark(pc, cx, cy, CHECK_R, item.done);
                 let color = if item.done {
                     cce_ui::colors::TEXT_DIM
                 } else {
