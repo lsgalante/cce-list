@@ -49,8 +49,10 @@ const CHECK_R: f32 = cce_ui::widget::Checkbox::ROUND_RADIUS;
 /// Side of the ✕ delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
 /// How often the lists directory is re-read for outside changes (the sync
-/// timer, a hand edit), in seconds.
-const WATCH_EVERY: f32 = 1.0;
+/// timer, a hand edit). The runner wakes an idle app once a second by itself,
+/// so this costs no extra frames; `idle_poll_interval` pins the cadence
+/// rather than inheriting it.
+const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The switcher's trailing pseudo-entries, after the list titles.
 const NEW_LIST: &str = "New list…";
@@ -163,7 +165,11 @@ struct ListApp {
     /// Outside-change detection: what the directory looked like when the
     /// lists were last read, and the countdown to the next look.
     disk_sig: Vec<(String, Option<std::time::SystemTime>)>,
-    watch_timer: f32,
+    /// When the directory may be re-read again. A wall clock, not an
+    /// accumulation of `tick`'s `dt`: `dt` is animation time, clamped to one
+    /// frame after an idle sleep, and a list nobody is typing into is idle —
+    /// so the once-a-second look actually happened about once a minute.
+    watch_at: std::time::Instant,
 }
 
 impl ListApp {
@@ -469,7 +475,7 @@ impl Application for ListApp {
             pointer: None,
             hovered_row: None,
             disk_sig: Vec::new(),
-            watch_timer: 0.0,
+            watch_at: std::time::Instant::now(),
         };
         app.load_from_disk();
         app
@@ -492,6 +498,13 @@ impl Application for ListApp {
         }
     }
 
+    /// The directory watch in `tick` is work the runner cannot see — nothing
+    /// redraws until the files change underneath us — so name the cadence the
+    /// loop has to come back at.
+    fn idle_poll_interval(&self) -> Option<std::time::Duration> {
+        Some(WATCH_EVERY)
+    }
+
     fn tick(&mut self, dt: f32, needs_rebuild: &mut bool) {
         if self.ui_context.tick(dt) {
             *needs_rebuild = true;
@@ -504,9 +517,9 @@ impl Application for ListApp {
         // Outside changes (the sync tick, a hand edit) show up without a
         // relaunch — but never while typing a name, which a reload would
         // interrupt; that waits a second.
-        self.watch_timer += dt;
-        if self.watch_timer >= WATCH_EVERY {
-            self.watch_timer = 0.0;
+        let now = std::time::Instant::now();
+        if now >= self.watch_at {
+            self.watch_at = now + WATCH_EVERY;
             if self.mode == Mode::Items && disk_signature() != self.disk_sig {
                 self.load_from_disk();
                 *needs_rebuild = true;
