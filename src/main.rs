@@ -576,8 +576,7 @@ impl Application for ListApp {
         }
         pc.plate_spec(&PlateSpec {
             rect: Rect { x: 0.0, y: 0.0, width: w, height: h },
-            color: plate,
-            blur: false,
+            material: cce_ui::scene::Material::opaque(plate),
             window_corners: (true, true, true, true),
             depth: cce_ui::layout::bevel_width(),
         });
