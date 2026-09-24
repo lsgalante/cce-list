@@ -92,7 +92,8 @@ fn text_leaf_height(font_size: f32) -> f32 {
 }
 
 fn metrics(width: f32) -> Metrics {
-    let pad = cce_ui::layout::root_plate_padding();
+    // The window-edge inset: the root plate's roll plus one padding.
+    let pad = cce_ui::layout::root_plate_inset();
     let band_h = pad + text_leaf_height(TITLE_FONT_SIZE) + 10.0;
     let gap = cce_ui::layout::bevel_width().max(4.0);
     let input_y = band_h + gap;
