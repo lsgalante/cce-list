@@ -23,7 +23,7 @@ use cce_list::{
 };
 use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
-use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx, PlateSpec};
+use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
 use cce_ui::widget::{
     Adapted, Bounds, Dropdown, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta,
     NamedKey, ScrollMotion, TextBox, WidgetHost,
@@ -568,18 +568,9 @@ impl Application for ListApp {
         let (w, h) = (self.width as f32, self.height as f32);
         let mut pc = PaintCtx::new();
 
-        // The window plate, then the title strip carved one step down into it
-        // (the recessed header idiom — its only wall faces the content).
-        let mut plate = cce_ui::color::page_low_color();
-        if plate[3] > 0.001 {
-            plate[3] = cce_ui::color::root_plate_opacity();
-        }
-        pc.plate_spec(&PlateSpec {
-            rect: Rect { x: 0.0, y: 0.0, width: w, height: h },
-            material: cce_ui::scene::Material::opaque(plate),
-            window_corners: (true, true, true, true),
-            depth: cce_ui::layout::bevel_width(),
-        });
+        // The standard root plate, then the title strip carved one step down
+        // into it (the recessed header idiom — its only wall faces the content).
+        pc.root_plate(w, h);
         pc.recess_edges(
             Rect { x: 0.0, y: 0.0, width: w, height: m.band_h },
             (0.0, 0.0, 0.0, 0.0),
