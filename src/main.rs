@@ -9,14 +9,12 @@
 //! click on a row toggles it done; the ✕ that appears on hover deletes it.
 //! Rows scroll when they outgrow the window.
 //!
-//! Each list is a plain markdown checklist on disk
-//! (`~/.local/share/cce-list/lists/<title>.md`), so it can be read and
-//! edited with anything; the shown list is named in a `current` file next
-//! to them. Lists and items mirrored from Google Tasks by `cce-list-sync`
-//! carry `<!-- list:… -->` / `<!-- uid:… -->` comments; toggling, adding,
-//! deleting — items or whole lists — here is pushed to the server on the
-//! next sync tick, and the app re-reads the directory when the sync (or a
-//! hand edit) changes it.
+//! Each list is a plain markdown checklist on disk — with a notes vault
+//! configured, a note in the vault's `Tasks/` folder; otherwise
+//! `~/.local/share/cce-list/lists/<title>.md` — so it can be read and
+//! edited with anything (cce-notes, Obsidian on the phone); the shown list
+//! is named in a `current` file. The app re-reads the directory when
+//! something else (a vault sync, an editor) changes it.
 
 mod vault_tasks;
 
@@ -51,8 +49,8 @@ const SWITCHER_SHARE: f32 = 0.62;
 const CHECK_R: f32 = cce_ui::widget::Checkbox::ROUND_RADIUS;
 /// Side of the ✕ delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
-/// How often the lists directory is re-read for outside changes (the sync
-/// timer, a hand edit). The runner wakes an idle app once a second by itself,
+/// How often the lists directory is re-read for outside changes (a vault
+/// sync, an edit elsewhere). The runner wakes an idle app once a second by itself,
 /// so this costs no extra frames; `idle_poll_interval` pins the cadence
 /// rather than inheriting it.
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
@@ -247,7 +245,7 @@ impl ListApp {
     }
 
     /// (Re)read every list from disk. Keeps the shown list by title where it
-    /// still exists (the sync may have renamed or removed it), guarantees at
+    /// still exists (an edit elsewhere may have renamed or removed it), guarantees at
     /// least one list, and refreshes the switcher.
     fn load_from_disk(&mut self) {
         let mut lists = match load_lists() {
@@ -258,7 +256,7 @@ impl ListApp {
             }
         };
         if lists.is_empty() {
-            let first = ListFile { title: "Tasks".to_string(), ..Default::default() };
+            let first = cce_list::new_list("To Do");
             if let Err(e) = save_list(&first) {
                 log::error!("cce-list: creating the first list: {e}");
             }
@@ -358,7 +356,7 @@ impl ListApp {
             self.select_list(idx);
             return;
         }
-        let list = ListFile { title: title.clone(), ..Default::default() };
+        let list = cce_list::new_list(&title);
         if let Err(e) = save_list(&list) {
             log::error!("cce-list: creating {title}: {e}");
             return;
@@ -379,7 +377,7 @@ impl ListApp {
             return;
         }
         if self.lists.len() <= 1 {
-            // The server keeps a default list too; one is the floor.
+            // The switcher needs something to show; one list is the floor.
             self.set_mode(Mode::Items);
             self.input_box.set_placeholder("Keep at least one list");
             self.needs_rebuild = true;
@@ -532,7 +530,7 @@ impl ListApp {
                     return;
                 }
                 if let Some(list) = self.lists.get_mut(self.cur) {
-                    list.items.push(Item { text, ..Default::default() });
+                    cce_list::push_item(list, text);
                 }
                 self.clear_input();
                 self.save_current_list();
@@ -620,7 +618,7 @@ impl Application for ListApp {
                 self.needs_rebuild = true;
             }
         }
-        // Outside changes (the sync tick, a hand edit) show up without a
+        // Outside changes (a vault sync, a hand edit) show up without a
         // relaunch — but never while typing a name, which a reload would
         // interrupt; that waits a second.
         let now = std::time::Instant::now();
