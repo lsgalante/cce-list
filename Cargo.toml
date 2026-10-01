@@ -16,6 +16,7 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 roxmltree = "0.20"
 chrono = "0.4"
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "11a26a5f8e1ff1ac55a951d88afc751ab68a5aba" }
 keyring = { version = "3", features = ["sync-secret-service"] }
 
 # The desktop checklist app; src/bin/sync.rs adds the cce-list-sync helper,

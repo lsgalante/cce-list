@@ -18,9 +18,12 @@
 //! next sync tick, and the app re-reads the directory when the sync (or a
 //! hand edit) changes it.
 
+mod vault_tasks;
+
 use cce_list::{
     delete_list, lists_dir, load_current, load_lists, save_current, save_list, Item, ListFile,
 };
+use vault_tasks::{Row, VaultTasks};
 use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
@@ -58,6 +61,17 @@ const WATCH_EVERY: std::time::Duration = std::time::Duration::from_secs(1);
 const NEW_LIST: &str = "New list…";
 const DELETE_LIST: &str = "Delete list…";
 const ITEM_PLACEHOLDER: &str = "Remember to…";
+/// The switcher entry (and `current` value) for every open task in the
+/// notes vault; listed only when a vault is configured.
+const VAULT_TASKS: &str = "Vault tasks";
+const VAULT_PLACEHOLDER: &str = "Add to today's note…";
+
+/// One row as drawn: a list item, a vault task, or a vault note's name.
+struct RowView {
+    text: String,
+    done: bool,
+    header: bool,
+}
 
 #[derive(Debug, Clone)]
 enum ListMessage {
@@ -166,6 +180,10 @@ struct ListApp {
     /// Outside-change detection: what the directory looked like when the
     /// lists were last read, and the countdown to the next look.
     disk_sig: Vec<(String, Option<std::time::SystemTime>)>,
+    /// The notes vault's tasks, when a vault is configured; `in_vault`
+    /// says the window shows them instead of a list.
+    vault: Option<VaultTasks>,
+    in_vault: bool,
     /// When the directory may be re-read again. A wall clock, not an
     /// accumulation of `tick`'s `dt`: `dt` is animation time, clamped to one
     /// frame after an idle sleep, and a list nobody is typing into is idle —
@@ -178,12 +196,54 @@ impl ListApp {
         self.lists.get(self.cur).map(|l| l.items.as_slice()).unwrap_or(&[])
     }
 
-    fn switcher_options(lists: &[ListFile]) -> Vec<String> {
-        lists
+    fn vault_rows(&self) -> &[Row] {
+        match (&self.vault, self.in_vault) {
+            (Some(v), true) => &v.rows,
+            _ => &[],
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        if self.in_vault { self.vault_rows().len() } else { self.items().len() }
+    }
+
+    fn rows(&self) -> Vec<RowView> {
+        if self.in_vault {
+            self.vault_rows()
+                .iter()
+                .map(|r| match r {
+                    Row::Note { name, .. } => RowView { text: name.clone(), done: false, header: true },
+                    Row::Task { text, done, .. } => RowView { text: text.clone(), done: *done, header: false },
+                })
+                .collect()
+        } else {
+            self.items().iter().map(|i| RowView { text: i.text.clone(), done: i.done, header: false }).collect()
+        }
+    }
+
+    fn switcher_options(&self) -> Vec<String> {
+        self.lists
             .iter()
             .map(|l| l.title.clone())
+            .chain(self.vault.as_ref().map(|_| VAULT_TASKS.to_string()))
             .chain([NEW_LIST.to_string(), DELETE_LIST.to_string()])
             .collect()
+    }
+
+    /// Show the vault's tasks.
+    fn enter_vault(&mut self) {
+        let Some(v) = self.vault.as_mut() else { return };
+        v.enter();
+        self.in_vault = true;
+        self.switcher.selected = self.lists.len();
+        if let Err(e) = save_current(VAULT_TASKS) {
+            log::error!("cce-list: saving current list: {e}");
+        }
+        self.disk_sig = disk_signature();
+        self.scroll = 0.0;
+        self.hovered_row = None;
+        self.set_mode(Mode::Items);
+        self.needs_rebuild = true;
     }
 
     /// (Re)read every list from disk. Keeps the shown list by title where it
@@ -198,24 +258,26 @@ impl ListApp {
             }
         };
         if lists.is_empty() {
-            let first = ListFile { title: "Tasks".to_string(), id: None, items: Vec::new() };
+            let first = ListFile { title: "Tasks".to_string(), ..Default::default() };
             if let Err(e) = save_list(&first) {
                 log::error!("cce-list: creating the first list: {e}");
             }
             lists.push(first);
         }
         let wanted = load_current().or_else(|| self.lists.get(self.cur).map(|l| l.title.clone()));
+        let vault_wanted = wanted.as_deref() == Some(VAULT_TASKS) && self.vault.is_some();
         let cur = wanted
             .as_deref()
             .and_then(|t| lists.iter().position(|l| l.title == t))
-            .unwrap_or(0);
-        if wanted.as_deref() != Some(lists[cur].title.as_str()) {
+            .unwrap_or(self.cur.min(lists.len() - 1));
+        if !vault_wanted && wanted.as_deref() != Some(lists[cur].title.as_str()) {
             let _ = save_current(&lists[cur].title);
         }
         self.lists = lists;
         self.cur = cur;
-        self.switcher.options = Self::switcher_options(&self.lists);
-        self.switcher.selected = cur;
+        self.in_vault = vault_wanted;
+        self.switcher.options = self.switcher_options();
+        self.switcher.selected = if self.in_vault { self.lists.len() } else { cur };
         self.disk_sig = disk_signature();
         self.clamp_scroll();
         if let Some((px, py)) = self.pointer {
@@ -239,6 +301,7 @@ impl ListApp {
             return;
         }
         self.cur = idx;
+        self.in_vault = false;
         self.switcher.selected = idx;
         if let Err(e) = save_current(&self.lists[idx].title) {
             log::error!("cce-list: saving current list: {e}");
@@ -253,6 +316,7 @@ impl ListApp {
     fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
         let placeholder = match mode {
+            Mode::Items if self.in_vault => VAULT_PLACEHOLDER.to_string(),
             Mode::Items => ITEM_PLACEHOLDER.to_string(),
             Mode::NamingList => "Name the new list, then Enter".to_string(),
             Mode::ConfirmDelete => format!(
@@ -294,19 +358,26 @@ impl ListApp {
             self.select_list(idx);
             return;
         }
-        let list = ListFile { title: title.clone(), id: None, items: Vec::new() };
+        let list = ListFile { title: title.clone(), ..Default::default() };
         if let Err(e) = save_list(&list) {
             log::error!("cce-list: creating {title}: {e}");
             return;
         }
         self.lists.push(list);
         self.lists.sort_by_key(|l| l.title.to_lowercase());
-        self.switcher.options = Self::switcher_options(&self.lists);
+        self.switcher.options = self.switcher_options();
         let idx = self.lists.iter().position(|l| l.title == title).unwrap_or(0);
         self.select_list(idx);
     }
 
     fn begin_delete(&mut self) {
+        if self.in_vault {
+            // The vault view is not a list; there is nothing to delete.
+            self.set_mode(Mode::Items);
+            self.input_box.set_placeholder("Pick a list to delete it");
+            self.needs_rebuild = true;
+            return;
+        }
         if self.lists.len() <= 1 {
             // The server keeps a default list too; one is the floor.
             self.set_mode(Mode::Items);
@@ -328,7 +399,7 @@ impl ListApp {
             return;
         }
         self.lists.remove(self.cur);
-        self.switcher.options = Self::switcher_options(&self.lists);
+        self.switcher.options = self.switcher_options();
         let idx = self.cur.min(self.lists.len().saturating_sub(1));
         self.select_list(idx);
     }
@@ -336,14 +407,20 @@ impl ListApp {
     /// The switcher reported a pick: a list, or one of the two actions.
     fn switcher_picked(&mut self) {
         let idx = self.switcher.selected;
-        if idx < self.lists.len() {
-            if idx != self.cur {
+        let n = self.lists.len();
+        let has_vault = usize::from(self.vault.is_some());
+        if idx < n {
+            if idx != self.cur || self.in_vault {
                 self.select_list(idx);
             }
+        } else if has_vault == 1 && idx == n {
+            if !self.in_vault {
+                self.enter_vault();
+            }
         } else {
-            // A pseudo-entry: restore the trigger to the shown list.
-            self.switcher.selected = self.cur;
-            if idx == self.lists.len() {
+            // A pseudo-entry: restore the trigger to what is shown.
+            self.switcher.selected = if self.in_vault { n } else { self.cur };
+            if idx == n + has_vault {
                 self.begin_new_list();
             } else {
                 self.begin_delete();
@@ -381,7 +458,7 @@ impl ListApp {
     }
 
     fn max_scroll(&self, m: &Metrics) -> f32 {
-        (self.items().len() as f32 * ROW_H - self.list_viewport(m).height).max(0.0)
+        (self.row_count() as f32 * ROW_H - self.list_viewport(m).height).max(0.0)
     }
 
     fn clamp_scroll(&mut self) {
@@ -419,7 +496,7 @@ impl ListApp {
             return None;
         }
         let i = ((y - m.list_top + self.scroll) / ROW_H).floor();
-        let row = (i >= 0.0).then_some(i as usize).filter(|&i| i < self.items().len())?;
+        let row = (i >= 0.0).then_some(i as usize).filter(|&i| i < self.row_count())?;
         let r = self.row_rect(&m, row);
         (x >= r.x && x <= r.x + r.width).then_some(row)
     }
@@ -433,12 +510,29 @@ impl ListApp {
                     self.create_list(&text);
                 }
             }
+            Mode::Items if self.in_vault => {
+                if text.is_empty() {
+                    return;
+                }
+                if let Some(v) = self.vault.as_mut() {
+                    match v.add(&text) {
+                        Ok(path) => log::info!("cce-list: added a task to {path}"),
+                        Err(e) => {
+                            log::error!("cce-list: adding to today's note: {e}");
+                            self.input_box.set_placeholder("Could not write today's note");
+                        }
+                    }
+                }
+                self.clear_input();
+                self.clamp_scroll();
+                self.needs_rebuild = true;
+            }
             Mode::Items => {
                 if text.is_empty() {
                     return;
                 }
                 if let Some(list) = self.lists.get_mut(self.cur) {
-                    list.items.push(Item { text, done: false, uid: None });
+                    list.items.push(Item { text, ..Default::default() });
                 }
                 self.clear_input();
                 self.save_current_list();
@@ -476,6 +570,8 @@ impl Application for ListApp {
             pointer: None,
             hovered_row: None,
             disk_sig: Vec::new(),
+            vault: VaultTasks::open(),
+            in_vault: false,
             watch_at: std::time::Instant::now(),
         };
         app.load_from_disk();
@@ -514,6 +610,15 @@ impl Application for ListApp {
         if self.tick_scroll(dt) {
             *needs_rebuild = true;
             self.needs_rebuild = true;
+        }
+        // Vault changes arrive from the watcher thread; applying them is
+        // cheap, so do it every tick (at least once a second when idle).
+        if let Some(v) = self.vault.as_mut() {
+            if v.poll() && self.in_vault {
+                self.clamp_scroll();
+                *needs_rebuild = true;
+                self.needs_rebuild = true;
+            }
         }
         // Outside changes (the sync tick, a hand edit) show up without a
         // relaunch — but never while typing a name, which a reload would
@@ -585,12 +690,13 @@ impl Application for ListApp {
         // into the input or the plate's bottom roll.
         let (family, font_size) = cce_ui::layout::list_font_parsed();
         let vp = self.list_viewport(&m);
-        let items = self.items();
+        let items = self.rows();
+        let empty = if self.in_vault { "no open tasks in the vault" } else { "nothing to remember" };
         pc.clip(vp, |pc| {
             if items.is_empty() {
                 let r = self.row_rect(&m, 0);
                 pc.text_with(
-                    "nothing to remember".to_string(),
+                    empty.to_string(),
                     r.x,
                     cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0),
                     font_size,
@@ -605,6 +711,21 @@ impl Application for ListApp {
                     continue;
                 }
                 let hovered = self.hovered_row == Some(i);
+                if item.header {
+                    // A vault note's name: a click opens it in cce-notes.
+                    let color = if hovered { cce_ui::colors::TEXT_FG } else { cce_ui::colors::TEXT_DIM };
+                    let size = (font_size * 0.9).round();
+                    pc.text_with(
+                        item.text.clone(),
+                        r.x,
+                        cce_ui::layout::align_text_y(r.y, r.height, size, 0.0) + 2.0,
+                        size,
+                        srgb_u8(color),
+                        Some(family.clone()),
+                        Some([r.x, r.y, r.x + r.width, r.y + r.height]),
+                    );
+                    continue;
+                }
                 let (cx, cy) = (r.x + CHECK_R, r.y + r.height / 2.0);
                 cce_ui::widget::Checkbox::paint_round_mark(pc, cx, cy, CHECK_R, item.done);
                 let color = if item.done {
@@ -641,7 +762,7 @@ impl Application for ListApp {
                         Cap::Flat,
                     );
                 }
-                if hovered {
+                if hovered && !self.in_vault {
                     let d = Self::delete_rect(r);
                     let (dcx, dcy) = (d.x + d.width / 2.0, d.y + d.height / 2.0);
                     let arm = 4.0;
@@ -722,15 +843,35 @@ impl Application for ListApp {
 
         if button == MouseButton::Left && state == ElementState::Pressed {
             if let Some(i) = self.row_at(px, py) {
+                if self.in_vault {
+                    if let Some(v) = self.vault.as_mut() {
+                        match v.rows.get(i).cloned() {
+                            Some(Row::Note { path, .. }) => v.open_note(&path),
+                            Some(Row::Task { .. }) => {
+                                if let Err(e) = v.toggle(i) {
+                                    log::error!("cce-list: ticking a vault task: {e}");
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    self.needs_rebuild = true;
+                    *needs_rebuild = true;
+                    return None;
+                }
                 let m = metrics(self.width as f32);
                 let d = Self::delete_rect(self.row_rect(&m, i));
                 if let Some(list) = self.lists.get_mut(self.cur) {
                     if px >= d.x && px <= d.x + d.width && py >= d.y && py <= d.y + d.height {
-                        list.items.remove(i);
+                        cce_list::remove_item(list, i);
                         self.clamp_scroll();
                         self.hovered_row = self.row_at(px, py);
                     } else {
-                        list.items[i].done = !list.items[i].done;
+                        let item = &mut list.items[i];
+                        item.done = !item.done;
+                        // A custom status (`[/]`, `[-]`) does not survive a
+                        // tick by hand: it reads `x` or ` ` from now on.
+                        item.mark = None;
                     }
                 }
                 self.save_current_list();

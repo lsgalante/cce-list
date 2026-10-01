@@ -338,10 +338,11 @@ fn run_sync(backend: &Backend, dry_run: bool, force_deletes: bool) -> Result<(),
         let mut fresh = cce_list::load_list(&file.title).unwrap_or_else(|_| ListFile {
             title: file.title.clone(),
             id: Some(list_id.clone()),
-            items: Vec::new(),
+            ..Default::default()
         });
         fresh.id = Some(list_id.clone());
-        apply_local(&mut fresh.items, &plan, &todos, &created, &moved_from);
+        let orphans = apply_local(&mut fresh.items, &plan, &todos, &created, &moved_from);
+        fresh.trailer.splice(0..0, orphans);
         save_list(&fresh).map_err(|e| e.to_string())?;
     }
 
@@ -621,7 +622,7 @@ fn apply_list_plan(
     for id in &plan.pull_new {
         let r = &remote.lists[id];
         let title = unique_local_title(&r.title, local);
-        let file = ListFile { title, id: Some(id.clone()), items: Vec::new() };
+        let file = ListFile { title, id: Some(id.clone()), ..Default::default() };
         save_list(&file).map_err(|e| e.to_string())?;
         local.push(file);
         state.lists.insert(
@@ -818,8 +819,10 @@ fn apply_local(
     remote: &BTreeMap<String, &RemoteTodo>,
     created: &[(String, Option<String>, String)],
     moved_from: &[(String, String)],
-) {
-    items.retain(|i| {
+) -> Vec<String> {
+    // Lines kept above a deleted row move to the next row; any left with
+    // no row after them go back to the caller for the trailer.
+    let orphans = cce_list::retain_items(items, |i| {
         i.uid.as_deref().is_none_or(|u| !plan.pull_deletes.iter().any(|d| d == u))
     });
     for uid in &plan.pull_updates {
@@ -843,8 +846,9 @@ fn apply_local(
     }
     for uid in &plan.pull_new {
         let todo = remote[uid];
-        items.push(Item { text: todo.summary.clone(), done: todo.done, uid: Some(uid.clone()) });
+        items.push(Item { text: todo.summary.clone(), done: todo.done, uid: Some(uid.clone()), ..Default::default() });
     }
+    orphans
 }
 
 // ── Accounts ──────────────────────────────────────────────────────────────
@@ -1609,7 +1613,7 @@ mod tests {
     use super::*;
 
     fn item(text: &str, done: bool, uid: Option<&str>) -> Item {
-        Item { text: text.into(), done, uid: uid.map(String::from) }
+        Item { text: text.into(), done, uid: uid.map(String::from), ..Default::default() }
     }
 
     fn todo(summary: &str, done: bool, etag: &str) -> RemoteTodo {
@@ -1647,7 +1651,7 @@ mod tests {
     }
 
     fn lfile(title: &str, id: Option<&str>) -> ListFile {
-        ListFile { title: title.into(), id: id.map(String::from), items: Vec::new() }
+        ListFile { title: title.into(), id: id.map(String::from), ..Default::default() }
     }
 
     fn refs<'a>(m: &'a BTreeMap<String, RemoteTodo>) -> BTreeMap<String, &'a RemoteTodo> {
