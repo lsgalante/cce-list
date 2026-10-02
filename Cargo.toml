@@ -10,7 +10,7 @@ wayland-client = { version = "0.31", features = ["system"] }
 log = "0.4"
 env_logger = "0.11"
 chrono = "0.4"
-cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "97626a1c42aed82b24d0761070749ce4be4e1443" }
+cce-vault = { git = "https://github.com/lsgalante/cce-vault.git", rev = "827f72f6755871c6badc564626bc3813b0c58799" }
 
 [[bin]]
 name = "cce-list"
