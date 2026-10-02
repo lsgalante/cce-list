@@ -44,9 +44,10 @@ const TITLE_FONT_SIZE: f32 = 14.0;
 /// band's width it takes — the rest stays a drag handle for the window.
 const SWITCHER_H: f32 = 24.0;
 const SWITCHER_SHARE: f32 = 0.62;
-/// Checkbox disc radius; its hit target is the whole row, this is only drawn.
-/// The mark itself is cce-ui's round `Checkbox` style, so it matches one.
-const CHECK_R: f32 = cce_ui::widget::Checkbox::ROUND_RADIUS;
+/// Half the side of a row's check box; its hit target is the whole row, this
+/// is only drawn. The box is cce-ui's own (`Checkbox::paint_inline`), so it
+/// matches a `Checkbox` widget's: a well, with a plate in it when done.
+const CHECK_R: f32 = cce_ui::widget::Checkbox::INLINE_HALF;
 /// Side of the ✕ delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
 /// How often the lists directory is re-read for outside changes (a vault
@@ -725,7 +726,7 @@ impl Application for ListApp {
                     continue;
                 }
                 let (cx, cy) = (r.x + CHECK_R, r.y + r.height / 2.0);
-                cce_ui::widget::Checkbox::paint_round_mark(pc, cx, cy, CHECK_R, item.done);
+                cce_ui::widget::Checkbox::paint_inline(pc, cx, cy, CHECK_R, item.done);
                 let color = if item.done {
                     cce_ui::colors::TEXT_DIM
                 } else {
