@@ -54,13 +54,17 @@ pub fn build_rows<'a>(tasks: impl Iterator<Item = (&'a str, &'a Task)>, ticked: 
 
 impl VaultTasks {
     /// The configured vault's tasks, or `None` when no vault is set up.
-    pub fn open() -> Option<VaultTasks> {
+    /// `wake` runs on the watcher's thread after each batch is queued, so
+    /// the app's loop comes round to [`poll`](Self::poll) instead of
+    /// finding the batch on its next timed tick.
+    pub fn open(wake: impl Fn() + Send + 'static) -> Option<VaultTasks> {
         let root = cce_vault::config::vault_root(None).ok()?;
         let index = Index::open(&root, true).map_err(|e| log::warn!("vault tasks: {e}")).ok()?;
         let pending = Arc::new(Mutex::new(Vec::new()));
         let queue = pending.clone();
         let watcher = VaultWatcher::spawn(&root, move |paths| {
             queue.lock().unwrap_or_else(|e| e.into_inner()).extend(paths);
+            wake();
         })
         .map_err(|e| log::warn!("vault watcher: {e}"))
         .ok();
@@ -71,6 +75,11 @@ impl VaultTasks {
 
     fn rebuild(&mut self) {
         self.rows = build_rows(self.index.tasks(), &self.ticked);
+    }
+
+    /// Whether the vault watcher is running (it can fail to start).
+    pub fn watching(&self) -> bool {
+        self._watcher.is_some()
     }
 
     /// Apply queued vault changes; true when the rows may have changed.

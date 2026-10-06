@@ -73,6 +73,8 @@ struct RowView {
 #[derive(Debug, Clone)]
 enum ListMessage {
     Exit,
+    /// The vault watcher queued changes (`VaultTasks::open`'s `wake`).
+    VaultChanged,
 }
 
 /// What the input box is for right now.
@@ -188,6 +190,10 @@ struct ListApp {
     /// frame after an idle sleep, and a list nobody is typing into is idle —
     /// so the once-a-second look actually happened about once a minute.
     watch_at: std::time::Instant,
+    /// Something outside the app may have changed the lists: the vault
+    /// watcher said so, or (unwatched) the cadence came round. Checked in
+    /// `tick` once the input box is not taking a name.
+    outside_change: bool,
 }
 
 impl ListApp {
@@ -551,12 +557,20 @@ impl ListApp {
     }
 }
 
+impl ListApp {
+    /// Whether outside changes to the lists arrive as messages: lists live
+    /// in the vault and its watcher is running.
+    fn watched(&self) -> bool {
+        cce_list::in_vault() && self.vault.as_ref().is_some_and(|v| v.watching())
+    }
+}
+
 impl Application for ListApp {
     type Message = ListMessage;
 
     fn new(
         _qh: &QueueHandle<EngineState<Self>>,
-        _sender: calloop::channel::Sender<Self::Message>,
+        sender: calloop::channel::Sender<Self::Message>,
     ) -> Self {
         cce_ui::scale::set_scale_factor(1.0);
         let mut app = Self {
@@ -576,9 +590,12 @@ impl Application for ListApp {
             pointer: None,
             hovered_row: None,
             disk_sig: Vec::new(),
-            vault: VaultTasks::open(),
+            vault: VaultTasks::open(move || {
+                let _ = sender.send(ListMessage::VaultChanged);
+            }),
             in_vault: false,
             watch_at: std::time::Instant::now(),
+            outside_change: false,
         };
         app.load_from_disk();
         app
@@ -598,14 +615,19 @@ impl Application for ListApp {
     fn update(&mut self, msg: Self::Message, _needs_rebuild: &mut bool, exit: &mut bool) {
         match msg {
             ListMessage::Exit => *exit = true,
+            // Applied by `tick`, which the message's turn runs next.
+            ListMessage::VaultChanged => self.outside_change = true,
         }
     }
 
-    /// The directory watch in `tick` is work the runner cannot see — nothing
-    /// redraws until the files change underneath us — so name the cadence the
-    /// loop has to come back at.
+    /// With a vault, the lists are its `Tasks/` notes and the vault watcher
+    /// wakes the loop when they change (`ListMessage::VaultChanged`), so
+    /// nothing needs polling. Without one, the app's own lists folder is
+    /// re-read every [`WATCH_EVERY`] as before — work the runner cannot see,
+    /// so name the cadence. Until 2026-10-06 the folder was re-read every
+    /// second either way, and the watcher's batches waited for that tick.
     fn idle_poll_interval(&self) -> Option<std::time::Duration> {
-        Some(WATCH_EVERY)
+        (!self.watched()).then_some(WATCH_EVERY)
     }
 
     fn tick(&mut self, dt: f32, needs_rebuild: &mut bool) {
@@ -628,11 +650,16 @@ impl Application for ListApp {
         }
         // Outside changes (a vault sync, a hand edit) show up without a
         // relaunch — but never while typing a name, which a reload would
-        // interrupt; that waits a second.
+        // interrupt; that waits until the name is done. Watched, a change
+        // is announced; unwatched, the folder is looked at on the cadence.
         let now = std::time::Instant::now();
-        if now >= self.watch_at {
+        if !self.watched() && now >= self.watch_at {
             self.watch_at = now + WATCH_EVERY;
-            if self.mode == Mode::Items && disk_signature() != self.disk_sig {
+            self.outside_change = true;
+        }
+        if self.outside_change && self.mode == Mode::Items {
+            self.outside_change = false;
+            if disk_signature() != self.disk_sig {
                 self.load_from_disk();
                 *needs_rebuild = true;
             }
