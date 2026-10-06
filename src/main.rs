@@ -6,7 +6,7 @@
 //! naming the current list; it switches between lists and carries two
 //! trailing entries, "New list…" and "Delete list…", which turn the input
 //! box into a name prompt or a confirmation. One `TextBox` adds items; a
-//! click on a row toggles it done; the ✕ that appears on hover deletes it.
+//! click on a row toggles it done; the `x` glyph that appears on hover deletes it.
 //! Rows scroll when they outgrow the window.
 //!
 //! Each list is a plain markdown checklist on disk — with a notes vault
@@ -48,7 +48,7 @@ const SWITCHER_SHARE: f32 = 0.62;
 /// is only drawn. The box is cce-ui's own (`Checkbox::paint_inline`), so it
 /// matches a `Checkbox` widget's: a well, with a plate in it when done.
 const CHECK_R: f32 = cce_ui::widget::Checkbox::INLINE_HALF;
-/// Side of the ✕ delete target at a row's right edge.
+/// Side of the `x` delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
 /// How often the lists directory is re-read for outside changes (a vault
 /// sync, an edit elsewhere). The runner wakes an idle app once a second by itself,
@@ -739,8 +739,8 @@ impl Application for ListApp {
                     cce_ui::colors::TEXT_FG
                 };
                 let text_x = cx + CHECK_R + 8.0;
-                // The ✕ zone bounds the label whether or not it is drawn, so
-                // hovering never truncates the text it just revealed the ✕ over.
+                // The delete zone bounds the label whether or not its `x` is drawn,
+                // so hovering never truncates the text it just revealed the `x` over.
                 let text_end = r.x + r.width - DELETE_S - 4.0;
                 let text_y = cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0);
                 pc.text_with(
@@ -768,12 +768,16 @@ impl Application for ListApp {
                     );
                 }
                 if hovered && !self.in_vault {
+                    // The `x` glyph, centred in the delete zone.
                     let d = Self::delete_rect(r);
-                    let (dcx, dcy) = (d.x + d.width / 2.0, d.y + d.height / 2.0);
-                    let arm = 4.0;
-                    let dim = cce_ui::colors::TEXT_DIM;
-                    pc.vector(dcx - arm, dcy - arm, dcx + arm, dcy + arm, 1.5, dim, Cap::Round);
-                    pc.vector(dcx - arm, dcy + arm, dcx + arm, dcy - arm, 1.5, dim, Cap::Round);
+                    let side = 12.0;
+                    let glyph = Rect {
+                        x: d.x + (d.width - side) / 2.0,
+                        y: d.y + (d.height - side) / 2.0,
+                        width: side,
+                        height: side,
+                    };
+                    pc.icon("x", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
                 }
             }
         });
