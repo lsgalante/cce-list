@@ -428,12 +428,15 @@ impl ListApp {
         self.needs_rebuild = true;
     }
 
+    /// Where rows show: from under the input down to the plate's edge — the
+    /// face's, where the bottom roll begins — so a scrolled list runs to the
+    /// edge rather than stopping a padding short of it.
     fn list_viewport(&self, m: &Metrics) -> Rect {
         Rect {
             x: 0.0,
             y: m.list_top,
             width: self.width as f32,
-            height: (self.height as f32 - m.list_top - m.pad).max(0.0),
+            height: (self.height as f32 - m.list_top - cce_ui::layout::bevel_width()).max(0.0),
         }
     }
 
@@ -456,8 +459,11 @@ impl ListApp {
         }
     }
 
+    /// Scrolled to the end, the last row rests a padding clear of the edge,
+    /// as it would if the viewport stopped there.
     fn max_scroll(&self, m: &Metrics) -> f32 {
-        (self.row_count() as f32 * ROW_H - self.list_viewport(m).height).max(0.0)
+        let content = self.row_count() as f32 * ROW_H + cce_ui::layout::root_plate_padding();
+        (content - self.list_viewport(m).height).max(0.0)
     }
 
     fn clamp_scroll(&mut self) {
@@ -686,7 +692,7 @@ impl Application for ListApp {
         cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.input_box, &mut pc);
 
         // The rows, clipped to the viewport so a scrolled list never bleeds
-        // into the input or the plate's bottom roll.
+        // into the input or onto the plate's bottom roll.
         let (family, font_size) = cce_ui::layout::list_font_parsed();
         let vp = self.list_viewport(&m);
         let items = self.rows();
