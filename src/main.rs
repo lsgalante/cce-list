@@ -38,11 +38,9 @@ const INIT_H: u32 = 320;
 /// Small enough that the title band, the input box, and one row stay usable.
 const MIN_SIZE: (u32, u32) = (220, 160);
 const ROW_H: f32 = 26.0;
-const INPUT_H: f32 = 30.0;
 const TITLE_FONT_SIZE: f32 = 14.0;
-/// The list switcher in the title band: its height, and the share of the
-/// band's width it takes — the rest stays a drag handle for the window.
-const SWITCHER_H: f32 = 24.0;
+/// The share of the title band's width the list switcher takes — the rest
+/// stays a drag handle for the window.
 const SWITCHER_SHARE: f32 = 0.62;
 /// Half the side of a row's check box; its hit target is the whole row, this
 /// is only drawn. The box is cce-ui's own (`Checkbox::paint_inline`), so it
@@ -110,17 +108,19 @@ fn metrics(width: f32) -> Metrics {
     let band_h = pad + text_leaf_height(TITLE_FONT_SIZE) + 10.0;
     let gap = cce_ui::layout::bevel_width().max(4.0);
     let input_y = band_h + gap;
+    let switcher_h = cce_ui::layout::dropdown_height();
+    let input_h = cce_ui::layout::textbox_height();
     Metrics {
         pad,
         band_h,
         switcher: Rect {
             x: pad,
-            y: ((band_h - SWITCHER_H) / 2.0).max(2.0),
+            y: ((band_h - switcher_h) / 2.0).max(2.0),
             width: ((width - 2.0 * pad) * SWITCHER_SHARE).max(80.0),
-            height: SWITCHER_H,
+            height: switcher_h,
         },
-        input: Rect { x: pad, y: input_y, width: width - 2.0 * pad, height: INPUT_H },
-        list_top: input_y + INPUT_H + gap,
+        input: Rect { x: pad, y: input_y, width: width - 2.0 * pad, height: input_h },
+        list_top: input_y + input_h + gap,
     }
 }
 
