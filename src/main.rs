@@ -670,10 +670,8 @@ impl Application for ListApp {
         // Register once, at self's final address (the registry stores pointers).
         if !self.widgets_registered {
             self.widgets_registered = true;
-            let (id, ptr) = (self.input_box.id(), self.input_box.as_ptr_mut());
-            self.ui_context.register_widget(id, ptr);
-            let (id, ptr) = (self.switcher.id(), self.switcher.as_ptr_mut());
-            self.ui_context.register_widget(id, ptr);
+            self.ui_context.register_host(&mut self.input_box);
+            self.ui_context.register_host(&mut self.switcher);
         }
 
         let size_changed = self.width != size.width as u32
