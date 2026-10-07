@@ -842,6 +842,14 @@ impl Application for ListApp {
 
     fn handle_pointer_move(&mut self, pos: LogicalPosition, needs_rebuild: &mut bool) {
         self.pointer = Some((pos.x, pos.y));
+        // The shared context menu (the switcher's, the input box's) gets the
+        // pointer to itself while open: its row highlight.
+        if cce_ui::widget::context_menu::is_visible() {
+            if cce_ui::widget::context_menu::cursor_moved(pos.x, pos.y) {
+                *needs_rebuild = true;
+            }
+            return;
+        }
         let ev = Event::PointerMove { x: pos.x, y: pos.y, local_x: pos.x, local_y: pos.y };
         if self.ui_context.propagate_event(&ev, self.switcher.id()) {
             *needs_rebuild = true;
@@ -865,6 +873,20 @@ impl Application for ListApp {
         needs_rebuild: &mut bool,
     ) -> Option<Self::Message> {
         let (px, py) = (pos.x, pos.y);
+
+        // The shared context menu a right-click on the switcher or the input box
+        // opens takes every click while open, ahead even of the switcher: a row
+        // runs, a press anywhere else dismisses it. The toolkit leaves this
+        // routing to the app; without it the menu could not be closed by
+        // clicking outside it, and its rows did nothing.
+        if cce_ui::widget::context_menu::is_visible() {
+            if cce_ui::widget::context_menu::mouse_input(button, state, px, py, Some(&mut self.ui_context)) {
+                *needs_rebuild = true;
+                self.needs_rebuild = true;
+            }
+            return None;
+        }
+
         let ev = Event::MouseButton { button, state, x: px, y: py, local_x: px, local_y: py };
 
         // The switcher routes first: its open menu overlays the rows, so a
