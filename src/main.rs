@@ -603,7 +603,7 @@ impl Application for ListApp {
 
     fn settings(&self) -> WindowSettings {
         WindowSettings {
-            title: "cce-list".to_string(),
+            title: "List".to_string(),
             app_id: "cce-list".to_string(),
             width: INIT_W,
             height: INIT_H,
