@@ -22,6 +22,7 @@ use cce_list::{
     delete_list, lists_dir, load_current, load_lists, save_current, save_list, Item, ListFile,
 };
 use vault_tasks::{Row, VaultTasks};
+use cce_ui::widget::Owned;
 use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
@@ -162,8 +163,8 @@ struct ListApp {
     lists: Vec<ListFile>,
     cur: usize,
     mode: Mode,
-    switcher: Adapted<Dropdown>,
-    input_box: Adapted<TextBox>,
+    switcher: Owned<Adapted<Dropdown>>,
+    input_box: Owned<Adapted<TextBox>>,
     ui_context: cce_ui::context::UiContext,
     width: u32,
     height: u32,
@@ -577,8 +578,8 @@ impl Application for ListApp {
             lists: Vec::new(),
             cur: 0,
             mode: Mode::Items,
-            switcher: Dropdown::new(Vec::new(), 0),
-            input_box: TextBox::new(String::new()).with_placeholder(ITEM_PLACEHOLDER),
+            switcher: Owned::new(Dropdown::new(Vec::new(), 0)),
+            input_box: Owned::new(TextBox::new(String::new()).with_placeholder(ITEM_PLACEHOLDER)),
             ui_context: cce_ui::context::UiContext::new(),
             width: INIT_W,
             height: INIT_H,
