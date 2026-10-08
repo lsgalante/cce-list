@@ -352,7 +352,7 @@ impl ListApp {
 
     fn begin_new_list(&mut self) {
         self.set_mode(Mode::NamingList);
-        self.input_box.focus();
+        self.ui_context.focus_widget(&mut self.input_box);
         self.needs_rebuild = true;
     }
 
@@ -391,7 +391,7 @@ impl ListApp {
             return;
         }
         self.set_mode(Mode::ConfirmDelete);
-        self.input_box.unfocus();
+        self.ui_context.unfocus_widget(&mut self.input_box);
         self.needs_rebuild = true;
     }
 
@@ -937,7 +937,7 @@ impl Application for ListApp {
             }
         }
         if state == ElementState::Pressed && !self.input_box.hit_test(px, py, &self.ui_context) {
-            self.input_box.unfocus();
+            self.ui_context.unfocus_widget(&mut self.input_box);
             *needs_rebuild = true;
         }
         if self.ui_context.propagate_event(&ev, self.input_box.id()) {
@@ -993,7 +993,7 @@ impl Application for ListApp {
                 }
             }
             if let Key::Named(NamedKey::Escape) = event.logical_key {
-                self.input_box.unfocus();
+                self.ui_context.unfocus_widget(&mut self.input_box);
                 if self.mode != Mode::Items {
                     self.set_mode(Mode::Items);
                 }
