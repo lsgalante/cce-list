@@ -23,14 +23,13 @@ use cce_list::{
 };
 use vault_tasks::{Row, VaultTasks};
 use cce_ui::widget::Owned;
-use cce_ui::engine::{Application, EngineState, LogicalPosition, LogicalSize, WindowSettings};
+use cce_ui::engine::{Application, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
 use cce_ui::widget::{
     Adapted, Bounds, Dropdown, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta,
     NamedKey, ScrollMotion, TextBox, WidgetHost,
 };
-use wayland_client::QueueHandle;
 
 /// Initial size only — the window is freely resizable and the compositor
 /// restores the last geometry across sessions.
@@ -569,10 +568,9 @@ impl ListApp {
 impl Application for ListApp {
     type Message = ListMessage;
 
-    fn new(
-        _qh: &QueueHandle<EngineState<Self>>,
-        sender: calloop::channel::Sender<Self::Message>,
-    ) -> Self {
+    fn create(sender: cce_ui::engine::AppSender<Self::Message>) -> Self {
+        // The app keeps calloop's sender; `AppSender` converts into it.
+        let sender: calloop::channel::Sender<Self::Message> = sender.into();
         cce_ui::scale::set_scale_factor(1.0);
         let mut app = Self {
             lists: Vec::new(),
