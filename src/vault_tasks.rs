@@ -22,7 +22,7 @@ use cce_vault::{Index, Task, VaultWatcher};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
     Note { path: String, name: String },
-    Task { path: String, line: usize, text: String, done: bool },
+    Task { path: String, line: usize, text: String, done: bool, due: Option<chrono::NaiveDate> },
 }
 
 pub struct VaultTasks {
@@ -47,7 +47,13 @@ pub fn build_rows<'a>(tasks: impl Iterator<Item = (&'a str, &'a Task)>, ticked: 
             rows.push(Row::Note { path: path.to_string(), name: stem(path).to_string() });
             last = Some(path);
         }
-        rows.push(Row::Task { path: path.to_string(), line: t.line, text: t.text.trim().to_string(), done: !t.is_open() });
+        rows.push(Row::Task {
+            path: path.to_string(),
+            line: t.line,
+            text: t.text.trim().to_string(),
+            done: !t.is_open(),
+            due: t.due,
+        });
     }
     rows
 }
@@ -145,7 +151,7 @@ mod tests {
     use super::*;
 
     fn task(status: char, text: &str, line: usize) -> Task {
-        Task { status, text: text.into(), line, status_at: 0 }
+        Task { status, text: text.into(), line, status_at: 0, due: None }
     }
 
     #[test]
@@ -165,9 +171,9 @@ mod tests {
             rows,
             [
                 Row::Note { path: "A.md".into(), name: "A".into() },
-                Row::Task { path: "A.md".into(), line: 1, text: "one".into(), done: false },
+                Row::Task { path: "A.md".into(), line: 1, text: "one".into(), done: false, due: None },
                 Row::Note { path: "dir/B.md".into(), name: "B".into() },
-                Row::Task { path: "dir/B.md".into(), line: 4, text: "ticked now".into(), done: true },
+                Row::Task { path: "dir/B.md".into(), line: 4, text: "ticked now".into(), done: true, due: None },
             ]
         );
     }

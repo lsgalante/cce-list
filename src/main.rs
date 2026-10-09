@@ -64,11 +64,24 @@ const VAULT_TASKS: &str = "Vault tasks";
 const VAULT_PLACEHOLDER: &str = "Add to today's note…";
 
 /// One row as drawn: a list item, a vault task, or a vault note's name.
+/// A task's due date is shown beside it, so `text` is without it.
 struct RowView {
     text: String,
     done: bool,
     header: bool,
+    due: Option<chrono::NaiveDate>,
 }
+
+impl RowView {
+    fn task(text: &str, done: bool) -> RowView {
+        let (text, due) = cce_vault::split_due(text);
+        RowView { text, done, header: false, due }
+    }
+}
+
+/// An open task's date once it has passed: linear, like the toolkit's
+/// text colours it is drawn beside.
+const OVERDUE: [f32; 4] = [0.75, 0.16, 0.14, 1.0];
 
 #[derive(Debug, Clone)]
 enum ListMessage {
@@ -216,12 +229,12 @@ impl ListApp {
             self.vault_rows()
                 .iter()
                 .map(|r| match r {
-                    Row::Note { name, .. } => RowView { text: name.clone(), done: false, header: true },
-                    Row::Task { text, done, .. } => RowView { text: text.clone(), done: *done, header: false },
+                    Row::Note { name, .. } => RowView { text: name.clone(), done: false, header: true, due: None },
+                    Row::Task { text, done, .. } => RowView::task(text, *done),
                 })
                 .collect()
         } else {
-            self.items().iter().map(|i| RowView { text: i.text.clone(), done: i.done, header: false }).collect()
+            self.items().iter().map(|i| RowView::task(&i.text, i.done)).collect()
         }
     }
 
@@ -525,6 +538,7 @@ impl ListApp {
                 if text.is_empty() {
                     return;
                 }
+                let text = cce_list::with_typed_due(&text, chrono::Local::now().date_naive());
                 if let Some(v) = self.vault.as_mut() {
                     match v.add(&text) {
                         Ok(path) => log::info!("cce-list: added a task to {path}"),
@@ -542,6 +556,7 @@ impl ListApp {
                 if text.is_empty() {
                     return;
                 }
+                let text = cce_list::with_typed_due(&text, chrono::Local::now().date_naive());
                 if let Some(list) = self.lists.get_mut(self.cur) {
                     cce_list::push_item(list, text);
                 }
@@ -715,6 +730,7 @@ impl Application for ListApp {
         let vp = self.list_viewport(&m);
         let items = self.rows();
         let empty = if self.in_vault { "no open tasks in the vault" } else { "nothing to remember" };
+        let today = chrono::Local::now().date_naive();
         pc.clip(vp, |pc| {
             if items.is_empty() {
                 let r = self.row_rect(&m, 0);
@@ -759,8 +775,26 @@ impl Application for ListApp {
                 let text_x = cx + CHECK_R + 8.0;
                 // The delete zone bounds the label whether or not its `x` is drawn,
                 // so hovering never truncates the text it just revealed the `x` over.
-                let text_end = r.x + r.width - DELETE_S - 4.0;
+                let mut text_end = r.x + r.width - DELETE_S - 4.0;
                 let text_y = cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0);
+                if let Some(due) = item.due {
+                    // The date, right-aligned against the delete zone, in
+                    // a smaller size; the label stops short of it.
+                    let label = cce_list::due_label(due, today);
+                    let size = (font_size * 0.85).round();
+                    let lw = cce_ui::widget::display::measure_text_width(&label, &family, size);
+                    let color = if !item.done && due < today { OVERDUE } else { cce_ui::colors::TEXT_DIM };
+                    pc.text_with(
+                        label,
+                        text_end - lw,
+                        cce_ui::layout::align_text_y(r.y, r.height, size, 0.0),
+                        size,
+                        srgb_u8(color),
+                        Some(family.clone()),
+                        None,
+                    );
+                    text_end -= lw + 8.0;
+                }
                 pc.text_with(
                     item.text.clone(),
                     text_x,

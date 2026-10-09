@@ -410,6 +410,93 @@ pub fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
+// ── Due dates ─────────────────────────────────────────────────────────────
+//
+// A task's due date is written into its line as the Tasks plugin writes it,
+// `📅 2026-10-20`, and read by cce-vault's `split_due` (which also takes a
+// hand-written `due 2026-10-20`). The calendar shows dated tasks on their
+// day, from the vault index.
+
+use chrono::{Datelike, Days, Month, NaiveDate, Weekday};
+
+/// The line to store for what was typed: a trailing `due <when>` becomes
+/// `📅 <date>`. `<when>` is today / tomorrow, a weekday (the next one, today
+/// included), `in N days` / `in N weeks`, `10/20` (or `10/20/27`), `oct 20`
+/// / `20 oct`, or `2026-10-20`; a month-day already past means next year.
+/// Anything else is kept as typed, `due` and all.
+pub fn with_typed_due(text: &str, today: NaiveDate) -> String {
+    let lower = text.to_ascii_lowercase();
+    let at = if lower.starts_with("due ") { Some(0) } else { lower.rfind(" due ").map(|i| i + 1) };
+    let Some(at) = at else { return text.to_string() };
+    match due_phrase(&lower[at + 4..], today) {
+        Some(date) => cce_vault::with_due(&text[..at], date),
+        None => text.to_string(),
+    }
+}
+
+fn due_phrase(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let words: Vec<&str> = phrase.split_whitespace().collect();
+    let month_day = |m: u32, d: u32, y: Option<i32>| -> Option<NaiveDate> {
+        match y {
+            Some(y) => NaiveDate::from_ymd_opt(if y < 100 { 2000 + y } else { y }, m, d),
+            None => NaiveDate::from_ymd_opt(today.year(), m, d)
+                .filter(|&date| date >= today)
+                .or_else(|| NaiveDate::from_ymd_opt(today.year() + 1, m, d)),
+        }
+    };
+    match words.as_slice() {
+        ["today"] => Some(today),
+        ["tomorrow" | "tmr"] => today.succ_opt(),
+        ["in", n, unit] => {
+            let n: u64 = n.parse().ok()?;
+            let days = match unit.trim_end_matches('s') {
+                "day" => n,
+                "week" => n * 7,
+                _ => return None,
+            };
+            today.checked_add_days(Days::new(days))
+        }
+        [word] => {
+            if let Ok(wd) = word.parse::<Weekday>() {
+                let ahead = (wd.num_days_from_monday() + 7 - today.weekday().num_days_from_monday()) % 7;
+                return today.checked_add_days(Days::new(ahead as u64));
+            }
+            if let Ok(d) = NaiveDate::parse_from_str(word, "%Y-%m-%d") {
+                return Some(d);
+            }
+            let parts: Vec<&str> = word.split('/').collect();
+            match parts.as_slice() {
+                [m, d] => month_day(m.parse().ok()?, d.parse().ok()?, None),
+                [m, d, y] => month_day(m.parse().ok()?, d.parse().ok()?, Some(y.parse().ok()?)),
+                _ => None,
+            }
+        }
+        [a, b] => {
+            let (m, d) = match (a.parse::<Month>(), b.parse::<u32>(), b.parse::<Month>(), a.parse::<u32>()) {
+                (Ok(m), Ok(d), _, _) | (_, _, Ok(m), Ok(d)) => (m, d),
+                _ => return None,
+            };
+            month_day(m.number_from_month(), d, None)
+        }
+        _ => None,
+    }
+}
+
+/// How a due date reads beside its task: Today / Tomorrow / Yesterday, a
+/// weekday within the coming week, else the month and day (and the year
+/// when it is not this one).
+pub fn due_label(due: NaiveDate, today: NaiveDate) -> String {
+    let days = (due - today).num_days();
+    match days {
+        0 => "Today".to_string(),
+        1 => "Tomorrow".to_string(),
+        -1 => "Yesterday".to_string(),
+        2..=6 => due.format("%a").to_string(),
+        _ if due.year() == today.year() => due.format("%b %-d").to_string(),
+        _ => due.format("%b %-d %Y").to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +613,38 @@ mod tests {
         assert_eq!(safe_title("Home/Garden"), "Home-Garden");
         assert_eq!(safe_title("  "), "Untitled");
     }
-}
 
+    #[test]
+    fn typed_due_phrases() {
+        // A Friday.
+        let today = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        let t = |s: &str| with_typed_due(s, today);
+        assert_eq!(t("Book flights due 2026-10-20"), "Book flights 📅 2026-10-20");
+        assert_eq!(t("Book flights due tomorrow"), "Book flights 📅 2026-10-10");
+        assert_eq!(t("Call mum due Today"), "Call mum 📅 2026-10-09");
+        assert_eq!(t("Bins due fri"), "Bins 📅 2026-10-09");
+        assert_eq!(t("Bins due monday"), "Bins 📅 2026-10-12");
+        assert_eq!(t("Visa due in 2 weeks"), "Visa 📅 2026-10-23");
+        assert_eq!(t("Tax due 10/20"), "Tax 📅 2026-10-20");
+        assert_eq!(t("Tax due 3/1"), "Tax 📅 2027-03-01");
+        assert_eq!(t("Tax due 3/1/27"), "Tax 📅 2027-03-01");
+        assert_eq!(t("Gift due dec 24"), "Gift 📅 2026-12-24");
+        assert_eq!(t("Gift due 24 December"), "Gift 📅 2026-12-24");
+        // Kept as typed.
+        assert_eq!(t("Library books due soon"), "Library books due soon");
+        assert_eq!(t("residue fri"), "residue fri");
+        assert_eq!(t("Tax due 2/30"), "Tax due 2/30");
+    }
+
+    #[test]
+    fn due_labels() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 9).unwrap();
+        let l = |y, m, d| due_label(NaiveDate::from_ymd_opt(y, m, d).unwrap(), today);
+        assert_eq!(l(2026, 10, 9), "Today");
+        assert_eq!(l(2026, 10, 10), "Tomorrow");
+        assert_eq!(l(2026, 10, 8), "Yesterday");
+        assert_eq!(l(2026, 10, 13), "Tue");
+        assert_eq!(l(2026, 10, 20), "Oct 20");
+        assert_eq!(l(2027, 1, 2), "Jan 2 2027");
+    }
+}
