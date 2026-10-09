@@ -22,7 +22,7 @@ use cce_list::{
     delete_list, lists_dir, load_current, load_lists, save_current, save_list, Item, ListFile,
 };
 use vault_tasks::{Row, VaultTasks};
-use cce_ui::widget::Owned;
+use cce_ui::widget::Handle;
 use cce_ui::engine::{Application, LogicalPosition, LogicalSize, WindowSettings};
 use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
@@ -162,14 +162,13 @@ struct ListApp {
     lists: Vec<ListFile>,
     cur: usize,
     mode: Mode,
-    switcher: Owned<Adapted<Dropdown>>,
-    input_box: Owned<Adapted<TextBox>>,
+    switcher: Handle<Adapted<Dropdown>>,
+    input_box: Handle<Adapted<TextBox>>,
     ui_context: cce_ui::context::UiContext,
     width: u32,
     height: u32,
     scale_factor: f64,
     needs_rebuild: bool,
-    widgets_registered: bool,
     /// How far the list is scrolled down, in logical px; non-zero only once
     /// the rows overflow the window. The DRAWN offset — `scroll_motion`
     /// glides it (wheel) or coasts it (trackpad flick); direct writes (End
@@ -240,7 +239,7 @@ impl ListApp {
         let Some(v) = self.vault.as_mut() else { return };
         v.enter();
         self.in_vault = true;
-        self.switcher.selected = self.lists.len();
+        self.ui_context[self.switcher].selected = self.lists.len();
         if let Err(e) = save_current(VAULT_TASKS) {
             log::error!("cce-list: saving current list: {e}");
         }
@@ -281,8 +280,8 @@ impl ListApp {
         self.lists = lists;
         self.cur = cur;
         self.in_vault = vault_wanted;
-        self.switcher.options = self.switcher_options();
-        self.switcher.selected = if self.in_vault { self.lists.len() } else { cur };
+        self.ui_context[self.switcher].options = self.switcher_options();
+        self.ui_context[self.switcher].selected = if self.in_vault { self.lists.len() } else { cur };
         self.disk_sig = disk_signature();
         self.clamp_scroll();
         if let Some((px, py)) = self.pointer {
@@ -307,7 +306,7 @@ impl ListApp {
         }
         self.cur = idx;
         self.in_vault = false;
-        self.switcher.selected = idx;
+        self.ui_context[self.switcher].selected = idx;
         if let Err(e) = save_current(&self.lists[idx].title) {
             log::error!("cce-list: saving current list: {e}");
         }
@@ -329,30 +328,30 @@ impl ListApp {
                 self.lists.get(self.cur).map(|l| l.title.as_str()).unwrap_or("")
             ),
         };
-        self.input_box.set_placeholder(&placeholder);
+        self.ui_context[self.input_box].set_placeholder(&placeholder);
         self.clear_input();
     }
 
     fn clear_input(&mut self) {
-        self.input_box.text.clear();
-        self.input_box.edit_buffer.clear();
-        self.input_box.cursor_idx = 0;
+        self.ui_context[self.input_box].text.clear();
+        self.ui_context[self.input_box].edit_buffer.clear();
+        self.ui_context[self.input_box].cursor_idx = 0;
     }
 
     /// The live value: while the box is in edit mode the typed text sits in
     /// `edit_buffer`; `text` is only the last committed value.
     fn input_value(&self) -> String {
-        let raw = if self.input_box.editing {
-            &self.input_box.edit_buffer
+        let raw = if self.ui_context[self.input_box].editing {
+            &self.ui_context[self.input_box].edit_buffer
         } else {
-            &self.input_box.text
+            &self.ui_context[self.input_box].text
         };
         raw.trim().to_string()
     }
 
     fn begin_new_list(&mut self) {
         self.set_mode(Mode::NamingList);
-        self.ui_context.focus_widget(&mut self.input_box);
+        self.ui_context.focus_id(self.input_box.id());
         self.needs_rebuild = true;
     }
 
@@ -370,7 +369,7 @@ impl ListApp {
         }
         self.lists.push(list);
         self.lists.sort_by_key(|l| l.title.to_lowercase());
-        self.switcher.options = self.switcher_options();
+        self.ui_context[self.switcher].options = self.switcher_options();
         let idx = self.lists.iter().position(|l| l.title == title).unwrap_or(0);
         self.select_list(idx);
     }
@@ -379,19 +378,19 @@ impl ListApp {
         if self.in_vault {
             // The vault view is not a list; there is nothing to delete.
             self.set_mode(Mode::Items);
-            self.input_box.set_placeholder("Pick a list to delete it");
+            self.ui_context[self.input_box].set_placeholder("Pick a list to delete it");
             self.needs_rebuild = true;
             return;
         }
         if self.lists.len() <= 1 {
             // The switcher needs something to show; one list is the floor.
             self.set_mode(Mode::Items);
-            self.input_box.set_placeholder("Keep at least one list");
+            self.ui_context[self.input_box].set_placeholder("Keep at least one list");
             self.needs_rebuild = true;
             return;
         }
         self.set_mode(Mode::ConfirmDelete);
-        self.ui_context.unfocus_widget(&mut self.input_box);
+        self.ui_context.unfocus_id(self.input_box.id());
         self.needs_rebuild = true;
     }
 
@@ -404,14 +403,14 @@ impl ListApp {
             return;
         }
         self.lists.remove(self.cur);
-        self.switcher.options = self.switcher_options();
+        self.ui_context[self.switcher].options = self.switcher_options();
         let idx = self.cur.min(self.lists.len().saturating_sub(1));
         self.select_list(idx);
     }
 
     /// The switcher reported a pick: a list, or one of the two actions.
     fn switcher_picked(&mut self) {
-        let idx = self.switcher.selected;
+        let idx = self.ui_context[self.switcher].selected;
         let n = self.lists.len();
         let has_vault = usize::from(self.vault.is_some());
         if idx < n {
@@ -424,7 +423,7 @@ impl ListApp {
             }
         } else {
             // A pseudo-entry: restore the trigger to what is shown.
-            self.switcher.selected = if self.in_vault { n } else { self.cur };
+            self.ui_context[self.switcher].selected = if self.in_vault { n } else { self.cur };
             if idx == n + has_vault {
                 self.begin_new_list();
             } else {
@@ -531,7 +530,7 @@ impl ListApp {
                         Ok(path) => log::info!("cce-list: added a task to {path}"),
                         Err(e) => {
                             log::error!("cce-list: adding to today's note: {e}");
-                            self.input_box.set_placeholder("Could not write today's note");
+                            self.ui_context[self.input_box].set_placeholder("Could not write today's note");
                         }
                     }
                 }
@@ -572,18 +571,19 @@ impl Application for ListApp {
         // The app keeps calloop's sender; `AppSender` converts into it.
         let sender: calloop::channel::Sender<Self::Message> = sender.into();
         cce_ui::scale::set_scale_factor(1.0);
+        // The context owns the widgets; the app keeps their handles.
+        let mut ui_context = cce_ui::context::UiContext::new();
         let mut app = Self {
             lists: Vec::new(),
             cur: 0,
             mode: Mode::Items,
-            switcher: Owned::new(Dropdown::new(Vec::new(), 0)),
-            input_box: Owned::new(TextBox::new(String::new()).with_placeholder(ITEM_PLACEHOLDER)),
-            ui_context: cce_ui::context::UiContext::new(),
+            switcher: ui_context.insert(Dropdown::new(Vec::new(), 0)),
+            input_box: ui_context.insert(TextBox::new(String::new()).with_placeholder(ITEM_PLACEHOLDER)),
+            ui_context,
             width: INIT_W,
             height: INIT_H,
             scale_factor: 1.0,
             needs_rebuild: true,
-            widgets_registered: false,
             scroll: 0.0,
             scroll_motion: ScrollMotion::new(),
             pointer: None,
@@ -666,13 +666,6 @@ impl Application for ListApp {
     }
 
     fn display_list(&mut self, size: LogicalSize, scale: f64) -> Option<DisplayList> {
-        // Register once, at self's final address (the registry stores pointers).
-        if !self.widgets_registered {
-            self.widgets_registered = true;
-            self.ui_context.register_host(&mut self.input_box);
-            self.ui_context.register_host(&mut self.switcher);
-        }
-
         let size_changed = self.width != size.width as u32
             || self.height != size.height as u32
             || self.scale_factor != scale;
@@ -685,9 +678,9 @@ impl Application for ListApp {
         }
         let m = metrics(self.width as f32);
         if self.needs_rebuild || size_changed {
-            self.input_box
+            self.ui_context[self.input_box]
                 .set_rect(m.input.x, m.input.y, m.input.width, m.input.height);
-            self.switcher
+            self.ui_context[self.switcher]
                 .set_rect(m.switcher.x, m.switcher.y, m.switcher.width, m.switcher.height);
             self.needs_rebuild = false;
             self.ui_context.rebuild_spatial_grid();
@@ -697,8 +690,8 @@ impl Application for ListApp {
         // pass at the end of this function draws it. Re-registered every
         // frame from a clean slate, since the rect animates and closes.
         self.ui_context.clear_popovers();
-        if self.switcher.popover_rect().is_some() {
-            self.ui_context.register_popover(&mut self.switcher);
+        if self.ui_context[self.switcher].popover_rect().is_some() {
+            self.ui_context.register_popover_id(self.switcher.id());
         }
 
         let (w, h) = (self.width as f32, self.height as f32);
@@ -714,7 +707,7 @@ impl Application for ListApp {
             (false, false, true, false),
         );
 
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.input_box, &mut pc);
+        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.input_box], &mut pc);
 
         // The rows, clipped to the viewport so a scrolled list never bleeds
         // into the input.
@@ -808,8 +801,8 @@ impl Application for ListApp {
         });
 
         // The switcher's trigger, then its open menu on top of everything.
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.switcher, &mut pc);
-        self.switcher.render_popover(&mut pc);
+        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher], &mut pc);
+        self.ui_context[self.switcher].render_popover(&mut pc);
 
         Some(pc.finish())
     }
@@ -852,7 +845,7 @@ impl Application for ListApp {
             *needs_rebuild = true;
         }
         // Rows under an open menu are not hoverable.
-        let hovered = if self.switcher.open { None } else { self.row_at(pos.x, pos.y) };
+        let hovered = if self.ui_context[self.switcher].open { None } else { self.row_at(pos.x, pos.y) };
         if hovered != self.hovered_row {
             self.hovered_row = hovered;
             *needs_rebuild = true;
@@ -889,7 +882,7 @@ impl Application for ListApp {
         // The switcher routes first: its open menu overlays the rows, so a
         // press it handles must not fall through to what is beneath.
         if self.ui_context.propagate_event(&ev, self.switcher.id()) {
-            if self.switcher.take_change() {
+            if self.ui_context[self.switcher].take_change() {
                 self.switcher_picked();
             }
             *needs_rebuild = true;
@@ -936,8 +929,8 @@ impl Application for ListApp {
                 return None;
             }
         }
-        if state == ElementState::Pressed && !self.input_box.hit_test(px, py, &self.ui_context) {
-            self.ui_context.unfocus_widget(&mut self.input_box);
+        if state == ElementState::Pressed && !self.ui_context[self.input_box].hit_test(px, py, &self.ui_context) {
+            self.ui_context.unfocus_id(self.input_box.id());
             *needs_rebuild = true;
         }
         if self.ui_context.propagate_event(&ev, self.input_box.id()) {
@@ -954,7 +947,7 @@ impl Application for ListApp {
     ) {
         let m = metrics(self.width as f32);
         let max = self.max_scroll(&m);
-        if max <= 0.0 || self.switcher.open {
+        if max <= 0.0 || self.ui_context[self.switcher].open {
             return;
         }
         self.scroll_motion.reconcile(0.0, self.scroll);
@@ -974,9 +967,9 @@ impl Application for ListApp {
     ) -> Option<Self::Message> {
         let ev = Event::KeyInput(event.clone());
         // An open menu takes the keyboard: arrows move, Enter picks.
-        if self.switcher.open {
+        if self.ui_context[self.switcher].open {
             if self.ui_context.propagate_event(&ev, self.switcher.id()) {
-                if self.switcher.take_change() {
+                if self.ui_context[self.switcher].take_change() {
                     self.switcher_picked();
                 }
                 *needs_rebuild = true;
@@ -993,7 +986,7 @@ impl Application for ListApp {
                 }
             }
             if let Key::Named(NamedKey::Escape) = event.logical_key {
-                self.ui_context.unfocus_widget(&mut self.input_box);
+                self.ui_context.unfocus_id(self.input_box.id());
                 if self.mode != Mode::Items {
                     self.set_mode(Mode::Items);
                 }
@@ -1006,7 +999,7 @@ impl Application for ListApp {
                 // through the thread-local focus registry, so the UiContext's
                 // focused_widget — which that checks — never learns of it.
                 // A pending deletion takes Enter from anywhere.
-                if self.input_box.editing || self.mode == Mode::ConfirmDelete {
+                if self.ui_context[self.input_box].editing || self.mode == Mode::ConfirmDelete {
                     self.submit_input();
                     *needs_rebuild = true;
                     self.needs_rebuild = true;
