@@ -16,13 +16,12 @@
 //! is named in a `current` file. The app re-reads the directory when
 //! something else (a vault sync, an editor) changes it.
 
-mod date_picker;
 mod vault_tasks;
 
 use cce_list::{
     delete_list, lists_dir, load_current, load_lists, save_current, save_list, Item, ListFile,
 };
-use date_picker::{DatePicker, Outcome};
+use cce_ui::widget::input::date_picker::{DatePicker, Outcome};
 use vault_tasks::{Row, VaultTasks};
 use cce_ui::widget::Handle;
 use cce_ui::engine::{Application, LogicalPosition, LogicalSize, WindowSettings};
@@ -207,8 +206,8 @@ struct ListApp {
     /// says the window shows them instead of a list.
     vault: Option<VaultTasks>,
     in_vault: bool,
-    /// The open due-date picker, for a row of the shown list.
-    picker: Option<DatePicker>,
+    /// The open due-date picker, and the row it dates.
+    picker: Option<(DatePicker, usize)>,
     /// When the directory may be re-read again. A wall clock, not an
     /// accumulation of `tick`'s `dt`: `dt` is animation time, clamped to one
     /// frame after an idle sleep, and a list nobody is typing into is idle —
@@ -516,16 +515,16 @@ impl ListApp {
             Outcome::Set(d) => Some(d),
             Outcome::Clear => None,
         };
-        let Some(p) = self.picker.take() else { return true };
+        let Some((_, row)) = self.picker.take() else { return true };
         if self.in_vault {
             if let Some(v) = self.vault.as_mut() {
-                if let Err(e) = v.set_due(p.row, date) {
+                if let Err(e) = v.set_due(row, date) {
                     log::error!("cce-list: dating a vault task: {e}");
                 }
             }
             return true;
         }
-        if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(p.row)) {
+        if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(row)) {
             item.text = match date {
                 Some(d) => cce_vault::with_due(&item.text, d),
                 None => cce_vault::split_due(&item.text).0,
@@ -793,7 +792,7 @@ impl Application for ListApp {
 
         // The input box is a widget, so its text too would show through an
         // open picker that reaches up over it (as it does in a short window).
-        let input_covered = self.picker.as_ref().is_some_and(|p| {
+        let input_covered = self.picker.as_ref().is_some_and(|(p, _)| {
             let (r, i) = (p.rect, m.input);
             r.x < i.x + i.width && i.x < r.x + r.width && r.y < i.y + i.height && i.y < r.y + r.height
         });
@@ -812,7 +811,7 @@ impl Application for ListApp {
         // cannot hide the rows' text: a row it covers draws none (the
         // toolkit hides text under its own popovers, but only widgets can
         // register one). The picker names the item it is for.
-        let cover = self.picker.as_ref().map(|p| p.rect);
+        let cover = self.picker.as_ref().map(|(p, _)| p.rect);
         pc.clip(vp, |pc| {
             if items.is_empty() {
                 let r = self.row_rect(&m, 0);
@@ -867,7 +866,7 @@ impl Application for ListApp {
                 let (slot, _) = Self::date_zone(r, None, today);
                 let label_end = slot.x - 4.0;
                 let mut text_end = label_end;
-                let picking = self.picker.as_ref().is_some_and(|p| p.row == i);
+                let picking = self.picker.as_ref().is_some_and(|(_, row)| *row == i);
                 if (hovered || picking) && !covered {
                     let side = 13.0;
                     let glyph = Rect {
@@ -940,7 +939,7 @@ impl Application for ListApp {
             }
         });
 
-        if let Some(p) = &self.picker {
+        if let Some((p, _)) = &self.picker {
             p.paint(&mut pc, today);
         }
 
@@ -984,7 +983,7 @@ impl Application for ListApp {
             }
             return;
         }
-        if let Some(p) = self.picker.as_mut() {
+        if let Some((p, _)) = self.picker.as_mut() {
             // The open picker has the pointer: its own hover, none beneath.
             let hover = p.hit(pos.x, pos.y);
             if hover != p.hover || self.hovered_row.is_some() {
@@ -1036,9 +1035,9 @@ impl Application for ListApp {
         if self.picker.is_some() {
             if state == ElementState::Pressed {
                 let today = chrono::Local::now().date_naive();
-                let hit = self.picker.as_ref().and_then(|p| p.hit(px, py));
+                let hit = self.picker.as_ref().and_then(|(p, _)| p.hit(px, py));
                 let outcome = match hit {
-                    Some(hit) if button == MouseButton::Left => self.picker.as_mut().map_or(Outcome::Ignored, |p| p.press(hit, today)),
+                    Some(hit) if button == MouseButton::Left => self.picker.as_mut().map_or(Outcome::Ignored, |(p, _)| p.press(hit, today)),
                     Some(_) => Outcome::Ignored,
                     None => Outcome::Close,
                 };
@@ -1075,7 +1074,7 @@ impl Application for ListApp {
                     let (_, zone) = Self::date_zone(row, rv.due, today);
                     if zone.contains(px, py) {
                         let win = (self.width as f32, self.height as f32);
-                        self.picker = Some(DatePicker::open(i, rv.text, row, row.x + row.width, rv.due, today, win));
+                        self.picker = Some((DatePicker::open(row, row.x + row.width, rv.due, today, win).with_title(rv.text), i));
                         self.hovered_row = None;
                         self.ui_context.unfocus_id(self.input_box.id());
                         self.needs_rebuild = true;
@@ -1135,7 +1134,7 @@ impl Application for ListApp {
         _pos: LogicalPosition,
         needs_rebuild: &mut bool,
     ) {
-        if let Some(p) = self.picker.as_mut() {
+        if let Some((p, _)) = self.picker.as_mut() {
             // Over the picker the wheel flips months; elsewhere it closes
             // it (the rows are about to move out from under it).
             let over = self.pointer.is_some_and(|(x, y)| p.contains(x, y));
@@ -1179,7 +1178,7 @@ impl Application for ListApp {
         if self.picker.is_some() && !event.ctrl {
             if event.state == ElementState::Pressed {
                 let today = chrono::Local::now().date_naive();
-                let outcome = self.picker.as_mut().map_or(Outcome::Ignored, |p| p.key(event, today));
+                let outcome = self.picker.as_mut().map_or(Outcome::Ignored, |(p, _)| p.key(event, today));
                 if self.apply_picker(outcome) {
                     self.needs_rebuild = true;
                     *needs_rebuild = true;
