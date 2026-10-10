@@ -120,6 +120,14 @@ impl VaultTasks {
         Ok(())
     }
 
+    /// Set or clear the due date of the task in row `i`, in its note.
+    pub fn set_due(&mut self, i: usize, due: Option<chrono::NaiveDate>) -> Result<(), String> {
+        let Some(Row::Task { path, line, .. }) = self.rows.get(i).cloned() else { return Ok(()) };
+        self.index.set_task_due(&path, line, due).map_err(|e| e.to_string())?;
+        self.rebuild();
+        Ok(())
+    }
+
     /// Add `- [ ] text` to today's daily note (created from the vault's
     /// template if missing); returns its path.
     pub fn add(&mut self, text: &str) -> Result<String, String> {

@@ -485,9 +485,9 @@ impl ListApp {
         }
     }
 
-    /// A list item's date zone: the calendar glyph's slot left of the
-    /// delete zone, widened over the date label when the item has one. A
-    /// press anywhere in it opens the picker. The vault view has none.
+    /// A task's date zone: the calendar glyph's slot left of the delete
+    /// zone, widened over the date label when the task has one. A press
+    /// anywhere in it opens the picker.
     fn date_zone(row: Rect, due: Option<chrono::NaiveDate>, today: chrono::NaiveDate) -> (Rect, Rect) {
         let slot = Rect {
             x: row.x + row.width - DELETE_S - 2.0 - CAL_S,
@@ -517,6 +517,14 @@ impl ListApp {
             Outcome::Clear => None,
         };
         let Some(p) = self.picker.take() else { return true };
+        if self.in_vault {
+            if let Some(v) = self.vault.as_mut() {
+                if let Err(e) = v.set_due(p.row, date) {
+                    log::error!("cce-list: dating a vault task: {e}");
+                }
+            }
+            return true;
+        }
         if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(p.row)) {
             item.text = match date {
                 Some(d) => cce_vault::with_due(&item.text, d),
@@ -716,6 +724,8 @@ impl Application for ListApp {
         // cheap, so do it every tick (at least once a second when idle).
         if let Some(v) = self.vault.as_mut() {
             if v.poll() && self.in_vault {
+                // The rows may have moved under an open picker.
+                self.picker = None;
                 self.clamp_scroll();
                 *needs_rebuild = true;
                 self.needs_rebuild = true;
@@ -849,34 +859,28 @@ impl Application for ListApp {
                     cce_ui::colors::TEXT_FG
                 };
                 let text_x = cx + CHECK_R + 8.0;
-                // The delete zone bounds the label whether or not its `x` is drawn,
-                // so hovering never truncates the text it just revealed the `x` over.
-                let mut text_end = r.x + r.width - DELETE_S - 4.0;
+                // The delete zone and the calendar glyph's slot bound the label
+                // whether or not their glyphs are drawn, so hovering never
+                // truncates the text it just revealed them over. A vault task
+                // has the slot too, though only a list item has the `x`.
                 let text_y = cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0);
-                // A list item keeps the calendar glyph's slot too, drawn on
-                // hover (or while its picker is open); the vault view sets
-                // no dates, so its labels sit against the delete zone.
-                let mut label_end = text_end;
-                if !self.in_vault {
-                    let (slot, _) = Self::date_zone(r, None, today);
-                    label_end = slot.x - 4.0;
-                    text_end = label_end;
-                    let picking = self.picker.as_ref().is_some_and(|p| p.row == i);
-                    if (hovered || picking) && !covered {
-                        let side = 13.0;
-                        let glyph = Rect {
-                            x: slot.x + (slot.width - side) / 2.0,
-                            y: slot.y + (slot.height - side) / 2.0,
-                            width: side,
-                            height: side,
-                        };
-                        pc.icon("calendar", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
-                    }
+                let (slot, _) = Self::date_zone(r, None, today);
+                let label_end = slot.x - 4.0;
+                let mut text_end = label_end;
+                let picking = self.picker.as_ref().is_some_and(|p| p.row == i);
+                if (hovered || picking) && !covered {
+                    let side = 13.0;
+                    let glyph = Rect {
+                        x: slot.x + (slot.width - side) / 2.0,
+                        y: slot.y + (slot.height - side) / 2.0,
+                        width: side,
+                        height: side,
+                    };
+                    pc.icon("calendar", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
                 }
                 if let Some(due) = item.due {
-                    // The date, right-aligned against the glyph slot (or the
-                    // delete zone), in a smaller size; the label stops short
-                    // of it.
+                    // The date, right-aligned against the glyph slot, in a
+                    // smaller size; the label stops short of it.
                     let label = cce_list::due_label(due, today);
                     let size = due_size(font_size);
                     let lw = cce_ui::widget::display::measure_text_width(&label, &family, size);
@@ -1062,6 +1066,23 @@ impl Application for ListApp {
 
         if button == MouseButton::Left && state == ElementState::Pressed {
             if let Some(i) = self.row_at(px, py) {
+                // A press in a task's date zone opens the picker, in a list
+                // or the vault view (a note's name row has none).
+                let m = metrics(self.width as f32);
+                let row = self.row_rect(&m, i);
+                let today = chrono::Local::now().date_naive();
+                if let Some(rv) = self.rows().into_iter().nth(i).filter(|rv| !rv.header) {
+                    let (_, zone) = Self::date_zone(row, rv.due, today);
+                    if zone.contains(px, py) {
+                        let win = (self.width as f32, self.height as f32);
+                        self.picker = Some(DatePicker::open(i, rv.text, row, row.x + row.width, rv.due, today, win));
+                        self.hovered_row = None;
+                        self.ui_context.unfocus_id(self.input_box.id());
+                        self.needs_rebuild = true;
+                        *needs_rebuild = true;
+                        return None;
+                    }
+                }
                 if self.in_vault {
                     if let Some(v) = self.vault.as_mut() {
                         match v.rows.get(i).cloned() {
@@ -1074,21 +1095,6 @@ impl Application for ListApp {
                             None => {}
                         }
                     }
-                    self.needs_rebuild = true;
-                    *needs_rebuild = true;
-                    return None;
-                }
-                let m = metrics(self.width as f32);
-                let row = self.row_rect(&m, i);
-                let today = chrono::Local::now().date_naive();
-                let due = self.items().get(i).and_then(|it| cce_vault::split_due(&it.text).1);
-                let (_, zone) = Self::date_zone(row, due, today);
-                if zone.contains(px, py) {
-                    let win = (self.width as f32, self.height as f32);
-                    let title = self.items().get(i).map(|it| cce_vault::split_due(&it.text).0).unwrap_or_default();
-                    self.picker = Some(DatePicker::open(i, title, row, row.x + row.width, due, today, win));
-                    self.hovered_row = None;
-                    self.ui_context.unfocus_id(self.input_box.id());
                     self.needs_rebuild = true;
                     *needs_rebuild = true;
                     return None;
