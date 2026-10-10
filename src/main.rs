@@ -16,11 +16,13 @@
 //! is named in a `current` file. The app re-reads the directory when
 //! something else (a vault sync, an editor) changes it.
 
+mod date_picker;
 mod vault_tasks;
 
 use cce_list::{
     delete_list, lists_dir, load_current, load_lists, save_current, save_list, Item, ListFile,
 };
+use date_picker::{DatePicker, Outcome};
 use vault_tasks::{Row, VaultTasks};
 use cce_ui::widget::Handle;
 use cce_ui::engine::{Application, LogicalPosition, LogicalSize, WindowSettings};
@@ -48,6 +50,9 @@ const SWITCHER_SHARE: f32 = 0.62;
 const CHECK_R: f32 = cce_ui::widget::Checkbox::INLINE_HALF;
 /// Side of the `x` delete target at a row's right edge.
 const DELETE_S: f32 = 18.0;
+/// The calendar glyph's slot, left of the delete zone: hovering a list
+/// item shows it, and it (or the item's date label) opens the date picker.
+const CAL_S: f32 = 18.0;
 /// How often the lists directory is re-read for outside changes (a vault
 /// sync, an edit elsewhere). The runner wakes an idle app once a second by itself,
 /// so this costs no extra frames; `idle_poll_interval` pins the cadence
@@ -77,6 +82,11 @@ impl RowView {
         let (text, due) = cce_vault::split_due(text);
         RowView { text, done, header: false, due }
     }
+}
+
+/// A row's date label size: a step below the row text.
+fn due_size(font_size: f32) -> f32 {
+    (font_size * 0.85).round()
 }
 
 /// An open task's date once it has passed: linear, like the toolkit's
@@ -197,6 +207,8 @@ struct ListApp {
     /// says the window shows them instead of a list.
     vault: Option<VaultTasks>,
     in_vault: bool,
+    /// The open due-date picker, for a row of the shown list.
+    picker: Option<DatePicker>,
     /// When the directory may be re-read again. A wall clock, not an
     /// accumulation of `tick`'s `dt`: `dt` is animation time, clamped to one
     /// frame after an idle sleep, and a list nobody is typing into is idle —
@@ -252,6 +264,7 @@ impl ListApp {
         let Some(v) = self.vault.as_mut() else { return };
         v.enter();
         self.in_vault = true;
+        self.picker = None;
         self.ui_context[self.switcher].selected = self.lists.len();
         if let Err(e) = save_current(VAULT_TASKS) {
             log::error!("cce-list: saving current list: {e}");
@@ -267,6 +280,8 @@ impl ListApp {
     /// still exists (an edit elsewhere may have renamed or removed it), guarantees at
     /// least one list, and refreshes the switcher.
     fn load_from_disk(&mut self) {
+        // The rows may have moved under it.
+        self.picker = None;
         let mut lists = match load_lists() {
             Ok(l) => l,
             Err(e) => {
@@ -319,6 +334,7 @@ impl ListApp {
         }
         self.cur = idx;
         self.in_vault = false;
+        self.picker = None;
         self.ui_context[self.switcher].selected = idx;
         if let Err(e) = save_current(&self.lists[idx].title) {
             log::error!("cce-list: saving current list: {e}");
@@ -469,6 +485,48 @@ impl ListApp {
         }
     }
 
+    /// A list item's date zone: the calendar glyph's slot left of the
+    /// delete zone, widened over the date label when the item has one. A
+    /// press anywhere in it opens the picker. The vault view has none.
+    fn date_zone(row: Rect, due: Option<chrono::NaiveDate>, today: chrono::NaiveDate) -> (Rect, Rect) {
+        let slot = Rect {
+            x: row.x + row.width - DELETE_S - 2.0 - CAL_S,
+            y: row.y + (row.height - CAL_S) / 2.0,
+            width: CAL_S,
+            height: CAL_S,
+        };
+        let lw = due.map_or(0.0, |d| {
+            let (family, size) = cce_ui::layout::list_font_parsed();
+            cce_ui::widget::display::measure_text_width(&cce_list::due_label(d, today), &family, due_size(size)) + 4.0
+        });
+        let zone = Rect { x: slot.x - lw, y: row.y, width: slot.width + lw, height: row.height };
+        (slot, zone)
+    }
+
+    /// Set or clear the picker's item's date and close it, or act on the
+    /// rest of what it answered. True when something changed.
+    fn apply_picker(&mut self, outcome: Outcome) -> bool {
+        let date = match outcome {
+            Outcome::Ignored => return false,
+            Outcome::Redraw => return true,
+            Outcome::Close => {
+                self.picker = None;
+                return true;
+            }
+            Outcome::Set(d) => Some(d),
+            Outcome::Clear => None,
+        };
+        let Some(p) = self.picker.take() else { return true };
+        if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(p.row)) {
+            item.text = match date {
+                Some(d) => cce_vault::with_due(&item.text, d),
+                None => cce_vault::split_due(&item.text).0,
+            };
+            self.save_current_list();
+        }
+        true
+    }
+
     fn delete_rect(row: Rect) -> Rect {
         Rect {
             x: row.x + row.width - DELETE_S,
@@ -603,6 +661,7 @@ impl Application for ListApp {
             scroll_motion: ScrollMotion::new(),
             pointer: None,
             hovered_row: None,
+            picker: None,
             disk_sig: Vec::new(),
             vault: VaultTasks::open(move || {
                 let _ = sender.send(ListMessage::VaultChanged);
@@ -722,7 +781,15 @@ impl Application for ListApp {
             (false, false, true, false),
         );
 
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.input_box], &mut pc);
+        // The input box is a widget, so its text too would show through an
+        // open picker that reaches up over it (as it does in a short window).
+        let input_covered = self.picker.as_ref().is_some_and(|p| {
+            let (r, i) = (p.rect, m.input);
+            r.x < i.x + i.width && i.x < r.x + r.width && r.y < i.y + i.height && i.y < r.y + r.height
+        });
+        if !input_covered {
+            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.input_box], &mut pc);
+        }
 
         // The rows, clipped to the viewport so a scrolled list never bleeds
         // into the input.
@@ -731,6 +798,11 @@ impl Application for ListApp {
         let items = self.rows();
         let empty = if self.in_vault { "no open tasks in the vault" } else { "nothing to remember" };
         let today = chrono::Local::now().date_naive();
+        // Display-list text draws above all geometry, so the picker's plate
+        // cannot hide the rows' text: a row it covers draws none (the
+        // toolkit hides text under its own popovers, but only widgets can
+        // register one). The picker names the item it is for.
+        let cover = self.picker.as_ref().map(|p| p.rect);
         pc.clip(vp, |pc| {
             if items.is_empty() {
                 let r = self.row_rect(&m, 0);
@@ -750,6 +822,10 @@ impl Application for ListApp {
                     continue;
                 }
                 let hovered = self.hovered_row == Some(i);
+                let covered = cover.is_some_and(|c| r.y < c.y + c.height && r.y + r.height > c.y);
+                if covered && item.header {
+                    continue;
+                }
                 if item.header {
                     // A vault note's name: a click opens it in cce-notes.
                     let color = if hovered { cce_ui::colors::TEXT_FG } else { cce_ui::colors::TEXT_DIM };
@@ -777,23 +853,49 @@ impl Application for ListApp {
                 // so hovering never truncates the text it just revealed the `x` over.
                 let mut text_end = r.x + r.width - DELETE_S - 4.0;
                 let text_y = cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0);
+                // A list item keeps the calendar glyph's slot too, drawn on
+                // hover (or while its picker is open); the vault view sets
+                // no dates, so its labels sit against the delete zone.
+                let mut label_end = text_end;
+                if !self.in_vault {
+                    let (slot, _) = Self::date_zone(r, None, today);
+                    label_end = slot.x - 4.0;
+                    text_end = label_end;
+                    let picking = self.picker.as_ref().is_some_and(|p| p.row == i);
+                    if (hovered || picking) && !covered {
+                        let side = 13.0;
+                        let glyph = Rect {
+                            x: slot.x + (slot.width - side) / 2.0,
+                            y: slot.y + (slot.height - side) / 2.0,
+                            width: side,
+                            height: side,
+                        };
+                        pc.icon("calendar", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
+                    }
+                }
                 if let Some(due) = item.due {
-                    // The date, right-aligned against the delete zone, in
-                    // a smaller size; the label stops short of it.
+                    // The date, right-aligned against the glyph slot (or the
+                    // delete zone), in a smaller size; the label stops short
+                    // of it.
                     let label = cce_list::due_label(due, today);
-                    let size = (font_size * 0.85).round();
+                    let size = due_size(font_size);
                     let lw = cce_ui::widget::display::measure_text_width(&label, &family, size);
                     let color = if !item.done && due < today { OVERDUE } else { cce_ui::colors::TEXT_DIM };
-                    pc.text_with(
-                        label,
-                        text_end - lw,
-                        cce_ui::layout::align_text_y(r.y, r.height, size, 0.0),
-                        size,
-                        srgb_u8(color),
-                        Some(family.clone()),
-                        None,
-                    );
-                    text_end -= lw + 8.0;
+                    if !covered {
+                        pc.text_with(
+                            label,
+                            label_end - lw,
+                            cce_ui::layout::align_text_y(r.y, r.height, size, 0.0),
+                            size,
+                            srgb_u8(color),
+                            Some(family.clone()),
+                            None,
+                        );
+                    }
+                    text_end = label_end - lw - 8.0;
+                }
+                if covered {
+                    continue;
                 }
                 pc.text_with(
                     item.text.clone(),
@@ -819,7 +921,7 @@ impl Application for ListApp {
                         Cap::Flat,
                     );
                 }
-                if hovered && !self.in_vault {
+                if hovered && !self.in_vault && cover.is_none() {
                     // The `x` glyph, centred in the delete zone.
                     let d = Self::delete_rect(r);
                     let side = 12.0;
@@ -833,6 +935,10 @@ impl Application for ListApp {
                 }
             }
         });
+
+        if let Some(p) = &self.picker {
+            p.paint(&mut pc, today);
+        }
 
         // The switcher's trigger, then its open menu on top of everything.
         cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher], &mut pc);
@@ -874,6 +980,16 @@ impl Application for ListApp {
             }
             return;
         }
+        if let Some(p) = self.picker.as_mut() {
+            // The open picker has the pointer: its own hover, none beneath.
+            let hover = p.hit(pos.x, pos.y);
+            if hover != p.hover || self.hovered_row.is_some() {
+                p.hover = hover;
+                self.hovered_row = None;
+                *needs_rebuild = true;
+            }
+            return;
+        }
         let ev = Event::PointerMove { x: pos.x, y: pos.y, local_x: pos.x, local_y: pos.y };
         if self.ui_context.propagate_event(&ev, self.switcher.id()) {
             *needs_rebuild = true;
@@ -911,6 +1027,26 @@ impl Application for ListApp {
             return None;
         }
 
+        // The open picker takes every press: on it, a pick; anywhere else,
+        // it closes and the press goes no further.
+        if self.picker.is_some() {
+            if state == ElementState::Pressed {
+                let today = chrono::Local::now().date_naive();
+                let hit = self.picker.as_ref().and_then(|p| p.hit(px, py));
+                let outcome = match hit {
+                    Some(hit) if button == MouseButton::Left => self.picker.as_mut().map_or(Outcome::Ignored, |p| p.press(hit, today)),
+                    Some(_) => Outcome::Ignored,
+                    None => Outcome::Close,
+                };
+                if self.apply_picker(outcome) {
+                    self.hovered_row = if self.picker.is_none() { self.row_at(px, py) } else { None };
+                    self.needs_rebuild = true;
+                    *needs_rebuild = true;
+                }
+            }
+            return None;
+        }
+
         let ev = Event::MouseButton { button, state, x: px, y: py, local_x: px, local_y: py };
 
         // The switcher routes first: its open menu overlays the rows, so a
@@ -943,7 +1079,21 @@ impl Application for ListApp {
                     return None;
                 }
                 let m = metrics(self.width as f32);
-                let d = Self::delete_rect(self.row_rect(&m, i));
+                let row = self.row_rect(&m, i);
+                let today = chrono::Local::now().date_naive();
+                let due = self.items().get(i).and_then(|it| cce_vault::split_due(&it.text).1);
+                let (_, zone) = Self::date_zone(row, due, today);
+                if zone.contains(px, py) {
+                    let win = (self.width as f32, self.height as f32);
+                    let title = self.items().get(i).map(|it| cce_vault::split_due(&it.text).0).unwrap_or_default();
+                    self.picker = Some(DatePicker::open(i, title, row, row.x + row.width, due, today, win));
+                    self.hovered_row = None;
+                    self.ui_context.unfocus_id(self.input_box.id());
+                    self.needs_rebuild = true;
+                    *needs_rebuild = true;
+                    return None;
+                }
+                let d = Self::delete_rect(row);
                 if let Some(list) = self.lists.get_mut(self.cur) {
                     if px >= d.x && px <= d.x + d.width && py >= d.y && py <= d.y + d.height {
                         cce_list::remove_item(list, i);
@@ -979,6 +1129,26 @@ impl Application for ListApp {
         _pos: LogicalPosition,
         needs_rebuild: &mut bool,
     ) {
+        if let Some(p) = self.picker.as_mut() {
+            // Over the picker the wheel flips months; elsewhere it closes
+            // it (the rows are about to move out from under it).
+            let over = self.pointer.is_some_and(|(x, y)| p.contains(x, y));
+            if over {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(d) => d.y as f32,
+                };
+                if dy != 0.0 {
+                    p.shift_month(if dy < 0.0 { 1 } else { -1 });
+                    self.needs_rebuild = true;
+                    *needs_rebuild = true;
+                }
+                return;
+            }
+            self.picker = None;
+            self.needs_rebuild = true;
+            *needs_rebuild = true;
+        }
         let m = metrics(self.width as f32);
         let max = self.max_scroll(&m);
         if max <= 0.0 || self.ui_context[self.switcher].open {
@@ -999,6 +1169,18 @@ impl Application for ListApp {
         event: &KeyEvent,
         needs_rebuild: &mut bool,
     ) -> Option<Self::Message> {
+        // The open picker takes the keyboard (Ctrl+Q still quits).
+        if self.picker.is_some() && !event.ctrl {
+            if event.state == ElementState::Pressed {
+                let today = chrono::Local::now().date_naive();
+                let outcome = self.picker.as_mut().map_or(Outcome::Ignored, |p| p.key(event, today));
+                if self.apply_picker(outcome) {
+                    self.needs_rebuild = true;
+                    *needs_rebuild = true;
+                }
+            }
+            return None;
+        }
         let ev = Event::KeyInput(event.clone());
         // An open menu takes the keyboard: arrows move, Enter picks.
         if self.ui_context[self.switcher].open {
