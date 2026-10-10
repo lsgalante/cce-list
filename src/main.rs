@@ -862,7 +862,7 @@ impl Application for ListApp {
             r.x < i.x + i.width && i.x < r.x + r.width && r.y < i.y + i.height && i.y < r.y + r.height
         });
         if !input_covered {
-            cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.input_box], &mut pc);
+            cce_ui::widget::painter::paint_root_into(&self.ui_context, &self.ui_context[self.input_box], &mut pc);
         }
 
         // The rows, clipped to the viewport so a scrolled list never bleeds
@@ -1030,7 +1030,7 @@ impl Application for ListApp {
         }
 
         // The switcher's trigger, then its open menu on top of everything.
-        cce_ui::scene::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher], &mut pc);
+        cce_ui::widget::painter::paint_root_into(&self.ui_context, &self.ui_context[self.switcher], &mut pc);
         self.ui_context[self.switcher].render_popover(&mut pc);
 
         Some(pc.finish())
