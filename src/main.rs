@@ -19,8 +19,9 @@
 //! A list item drags to a new place in its list: the press becomes a drag
 //! past a few pixels, a line shows where it will land, and the list scrolls
 //! when the pointer holds at its top or bottom edge; Escape cancels. A row
-//! ticks on release, so a press that becomes a drag does not tick it. The
-//! vault view's rows are lines of other notes and do not drag.
+//! ticks on release, so a press that becomes a drag does not tick it. In
+//! the vault view a task drags within its note or into another note's
+//! group (its line moves between the notes, through cce-vault).
 
 mod vault_tasks;
 
@@ -563,7 +564,7 @@ impl ListApp {
     fn drop_slot(&self, y: f32) -> usize {
         let m = metrics(self.width as f32);
         let rel = (y - m.list_top + self.scroll) / ROW_H;
-        (rel.round().max(0.0) as usize).min(self.items().len())
+        (rel.round().max(0.0) as usize).min(self.row_count())
     }
 
     /// While a drag is active: the gap it would drop into, unless that is
@@ -786,8 +787,9 @@ impl Application for ListApp {
         // cheap, so do it every tick (at least once a second when idle).
         if let Some(v) = self.vault.as_mut() {
             if v.poll() && self.in_vault {
-                // The rows may have moved under an open picker.
+                // The rows may have moved under an open picker or a drag.
                 self.picker = None;
+                self.row_drag = None;
                 self.clamp_scroll();
                 *needs_rebuild = true;
                 self.needs_rebuild = true;
@@ -1166,9 +1168,21 @@ impl Application for ListApp {
                 if d.active {
                     let (from, slot) = (d.from, self.drop_slot(py));
                     if slot != from && slot != from + 1 {
-                        if let Some(list) = self.lists.get_mut(self.cur) {
+                        if self.in_vault {
+                            if let Some(v) = self.vault.as_mut() {
+                                if let Err(e) = v.move_row(from, slot) {
+                                    log::error!("cce-list: moving a vault task: {e}");
+                                }
+                            }
+                        } else if let Some(list) = self.lists.get_mut(self.cur) {
                             cce_list::move_item(list, from, if slot > from { slot - 1 } else { slot });
                             self.save_current_list();
+                        }
+                    }
+                } else if self.in_vault {
+                    if let Some(v) = self.vault.as_mut() {
+                        if let Err(e) = v.toggle(d.from) {
+                            log::error!("cce-list: ticking a vault task: {e}");
                         }
                     }
                 } else if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(d.from)) {
@@ -1207,10 +1221,9 @@ impl Application for ListApp {
                     if let Some(v) = self.vault.as_mut() {
                         match v.rows.get(i).cloned() {
                             Some(Row::Note { path, .. }) => v.open_note(&path),
+                            // A drag, or on release a tick.
                             Some(Row::Task { .. }) => {
-                                if let Err(e) = v.toggle(i) {
-                                    log::error!("cce-list: ticking a vault task: {e}");
-                                }
+                                self.row_drag = Some(RowDrag { from: i, start: (px, py), at: (px, py), active: false });
                             }
                             None => {}
                         }

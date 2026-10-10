@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use cce_vault::index::stem;
-use cce_vault::{Index, Task, VaultWatcher};
+use cce_vault::{Index, Task, TaskPlace, VaultWatcher};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
@@ -124,6 +124,33 @@ impl VaultTasks {
     pub fn set_due(&mut self, i: usize, due: Option<chrono::NaiveDate>) -> Result<(), String> {
         let Some(Row::Task { path, line, .. }) = self.rows.get(i).cloned() else { return Ok(()) };
         self.index.set_task_due(&path, line, due).map_err(|e| e.to_string())?;
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Move the task in row `from` to the gap before row `slot` (a drag's
+    /// drop; `slot` may be one past the last row). It goes just before the
+    /// task under the gap, or else just after the task over it — so into
+    /// whichever note's group the gap belongs to, under that note's name
+    /// when dropped right below it. Tasks the view does not show (done ones)
+    /// stay where they are in their notes.
+    pub fn move_row(&mut self, from: usize, slot: usize) -> Result<(), String> {
+        let Some(Row::Task { path, line, .. }) = self.rows.get(from).cloned() else { return Ok(()) };
+        let task_at = |i: usize| match self.rows.get(i) {
+            Some(Row::Task { path, line, .. }) => Some((path.clone(), *line)),
+            _ => None,
+        };
+        let dest = match (task_at(slot), slot.checked_sub(1).and_then(task_at)) {
+            (Some((p, l)), _) => Some((p, TaskPlace::Before(l))),
+            (None, Some((p, l))) => Some((p, TaskPlace::After(l))),
+            // Above the first note's name: before its first task.
+            (None, None) => task_at(slot + 1).map(|(p, l)| (p, TaskPlace::Before(l))),
+        };
+        let Some((to, place)) = dest else { return Ok(()) };
+        self.index.move_task(&path, line, &to, place).map_err(|e| e.to_string())?;
+        // Lines in both notes have shifted: this session's ticks there no
+        // longer name the tasks they did.
+        self.ticked.retain(|(p, _)| *p != path && *p != to);
         self.rebuild();
         Ok(())
     }
