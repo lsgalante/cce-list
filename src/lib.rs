@@ -228,6 +228,24 @@ pub fn remove_item(list: &mut ListFile, i: usize) -> Item {
     item
 }
 
+/// Move item `from` to index `to` of the list as it is after the move (a
+/// drag in the app). Lines above it — a heading, prose — stay where they
+/// were, with the item after it ([`remove_item`]); at its new place it
+/// sits just above item `to`, taking over the lines above that one, so an
+/// item dropped on the first of a section lands under its heading. At the
+/// end it goes before the trailer.
+pub fn move_item(list: &mut ListFile, from: usize, to: usize) {
+    if from >= list.items.len() || from == to {
+        return;
+    }
+    let mut item = remove_item(list, from);
+    let to = to.min(list.items.len());
+    if let Some(next) = list.items.get_mut(to) {
+        item.before = std::mem::take(&mut next.before);
+    }
+    list.items.insert(to, item);
+}
+
 /// `Vec::retain` for items, keeping the lines above a dropped item with
 /// the next kept one. Lines that no kept item follows are returned, for
 /// the caller to put at the front of the trailer.
@@ -646,5 +664,25 @@ mod tests {
         assert_eq!(l(2026, 10, 13), "Tue");
         assert_eq!(l(2026, 10, 20), "Oct 20");
         assert_eq!(l(2027, 1, 2), "Jan 2 2027");
+    }
+
+    #[test]
+    fn moving_an_item_leaves_the_lines_around_it_in_place() {
+        let text = "# Top\n- [ ] a\nprose\n- [ ] b\n## Later\n- [ ] c\nend\n";
+        let moved = |from, to| {
+            let (id, items, trailer) = parse_file(text);
+            let mut list = ListFile { title: "t".into(), id, items, trailer };
+            move_item(&mut list, from, to);
+            serialize_file(&list)
+        };
+        // Down to the end: the heading and prose stay put.
+        assert_eq!(moved(0, 2), "# Top\nprose\n- [ ] b\n## Later\n- [ ] c\n- [ ] a\nend\n");
+        // Onto the first item of a section: under its heading.
+        assert_eq!(moved(0, 1), "# Top\nprose\n- [ ] b\n## Later\n- [ ] a\n- [ ] c\nend\n");
+        // Up to the top: under the top heading.
+        assert_eq!(moved(2, 0), "# Top\n- [ ] c\n- [ ] a\nprose\n- [ ] b\n## Later\nend\n");
+        // Onto itself, or out of range: untouched.
+        assert_eq!(moved(1, 1), text);
+        assert_eq!(moved(5, 0), text);
     }
 }

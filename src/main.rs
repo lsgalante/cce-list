@@ -15,6 +15,12 @@
 //! edited with anything (cce-notes, Obsidian on the phone); the shown list
 //! is named in a `current` file. The app re-reads the directory when
 //! something else (a vault sync, an editor) changes it.
+//!
+//! A list item drags to a new place in its list: the press becomes a drag
+//! past a few pixels, a line shows where it will land, and the list scrolls
+//! when the pointer holds at its top or bottom edge; Escape cancels. A row
+//! ticks on release, so a press that becomes a drag does not tick it. The
+//! vault view's rows are lines of other notes and do not drag.
 
 mod vault_tasks;
 
@@ -81,6 +87,21 @@ impl RowView {
         let (text, due) = cce_vault::split_due(text);
         RowView { text, done, header: false, due }
     }
+}
+
+/// How far the pointer travels before a press on a row becomes a drag.
+const DRAG_SLOP: f32 = 5.0;
+/// How fast the list scrolls while a drag holds at its edge, in px/s at
+/// the very edge (less further in).
+const DRAG_SCROLL_SPEED: f32 = 360.0;
+
+/// A press on a list item, and the drag it may have become.
+struct RowDrag {
+    from: usize,
+    start: (f32, f32),
+    at: (f32, f32),
+    /// Past `DRAG_SLOP`: the item follows the pointer.
+    active: bool,
 }
 
 /// A row's date label size: a step below the row text.
@@ -208,6 +229,8 @@ struct ListApp {
     in_vault: bool,
     /// The open due-date picker, and the row it dates.
     picker: Option<(DatePicker, usize)>,
+    /// A press on a list item, and the drag it may have become.
+    row_drag: Option<RowDrag>,
     /// When the directory may be re-read again. A wall clock, not an
     /// accumulation of `tick`'s `dt`: `dt` is animation time, clamped to one
     /// frame after an idle sleep, and a list nobody is typing into is idle —
@@ -281,6 +304,7 @@ impl ListApp {
     fn load_from_disk(&mut self) {
         // The rows may have moved under it.
         self.picker = None;
+        self.row_drag = None;
         let mut lists = match load_lists() {
             Ok(l) => l,
             Err(e) => {
@@ -534,6 +558,44 @@ impl ListApp {
         true
     }
 
+    /// Where a drag at height `y` would drop: the gap between rows nearest
+    /// it, 0 (above the first) to the item count (below the last).
+    fn drop_slot(&self, y: f32) -> usize {
+        let m = metrics(self.width as f32);
+        let rel = (y - m.list_top + self.scroll) / ROW_H;
+        (rel.round().max(0.0) as usize).min(self.items().len())
+    }
+
+    /// While a drag is active: the gap it would drop into, unless that is
+    /// where the item already is (either side of it).
+    fn active_drop(&self) -> Option<(usize, usize)> {
+        let d = self.row_drag.as_ref().filter(|d| d.active)?;
+        let slot = self.drop_slot(d.at.1);
+        (slot != d.from && slot != d.from + 1).then_some((d.from, slot))
+    }
+
+    /// Scroll toward the edge a drag holds at; true when it moved.
+    fn drag_autoscroll(&mut self, dt: f32) -> bool {
+        let Some(d) = self.row_drag.as_ref().filter(|d| d.active) else { return false };
+        let m = metrics(self.width as f32);
+        let vp = self.list_viewport(&m);
+        let y = d.at.1;
+        let push = if y < vp.y + ROW_H {
+            -(1.0 - ((y - vp.y) / ROW_H).clamp(0.0, 1.0))
+        } else if y > vp.y + vp.height - ROW_H {
+            1.0 - ((vp.y + vp.height - y) / ROW_H).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let max = self.max_scroll(&m);
+        let next = (self.scroll + push * DRAG_SCROLL_SPEED * dt).clamp(0.0, max);
+        if (next - self.scroll).abs() < 0.01 {
+            return false;
+        }
+        self.scroll = next;
+        true
+    }
+
     fn delete_rect(row: Rect) -> Rect {
         Rect {
             x: row.x + row.width - DELETE_S,
@@ -669,6 +731,7 @@ impl Application for ListApp {
             pointer: None,
             hovered_row: None,
             picker: None,
+            row_drag: None,
             disk_sig: Vec::new(),
             vault: VaultTasks::open(move || {
                 let _ = sender.send(ListMessage::VaultChanged);
@@ -715,7 +778,7 @@ impl Application for ListApp {
             *needs_rebuild = true;
             self.needs_rebuild = true;
         }
-        if self.tick_scroll(dt) {
+        if self.tick_scroll(dt) || self.drag_autoscroll(dt) {
             *needs_rebuild = true;
             self.needs_rebuild = true;
         }
@@ -852,7 +915,8 @@ impl Application for ListApp {
                 }
                 let (cx, cy) = (r.x + CHECK_R, r.y + r.height / 2.0);
                 cce_ui::widget::Checkbox::paint_inline(pc, cx, cy, CHECK_R, item.done);
-                let color = if item.done {
+                let dragged = self.row_drag.as_ref().is_some_and(|d| d.active && d.from == i);
+                let color = if item.done || dragged {
                     cce_ui::colors::TEXT_DIM
                 } else {
                     cce_ui::colors::TEXT_FG
@@ -937,10 +1001,30 @@ impl Application for ListApp {
                     pc.icon("x", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
                 }
             }
+            // Where a drag would drop: a line in the gap between rows.
+            if let Some((_, slot)) = self.active_drop() {
+                let r = self.row_rect(&m, slot);
+                let accent = cce_ui::colors::highlight_primary_color();
+                pc.rounded_rect(Rect { x: r.x, y: r.y - 1.0, width: r.width, height: 2.0 }, 1.0,
+                    (true, true, true, true), accent);
+            }
         });
 
         if let Some((p, _)) = &self.picker {
             p.paint(&mut pc, today);
+        }
+        // The dragged item's title at the pointer.
+        if let Some(d) = self.row_drag.as_ref().filter(|d| d.active) {
+            if let Some(rv) = items.get(d.from) {
+                let (x, y) = (d.at.0 + 10.0, d.at.1 - ROW_H / 2.0);
+                let w = (cce_ui::widget::display::measure_text_width(&rv.text, &family, font_size) + 16.0)
+                    .min(self.width as f32 - x - m.pad);
+                let r = Rect { x, y, width: w.max(0.0), height: ROW_H };
+                let accent = cce_ui::colors::highlight_primary_color();
+                pc.rounded_rect(r, 6.0, (true, true, true, true), [accent[0], accent[1], accent[2], 0.85]);
+                pc.text_with(rv.text.clone(), r.x + 8.0, cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0),
+                    font_size, [255, 255, 255], Some(family.clone()), Some([r.x, r.y, r.x + r.width - 4.0, r.y + r.height]));
+            }
         }
 
         // The switcher's trigger, then its open menu on top of everything.
@@ -982,6 +1066,18 @@ impl Application for ListApp {
                 *needs_rebuild = true;
             }
             return;
+        }
+        if let Some(d) = self.row_drag.as_mut() {
+            d.at = (pos.x, pos.y);
+            if !d.active && (pos.x - d.start.0).hypot(pos.y - d.start.1) > DRAG_SLOP {
+                d.active = true;
+                self.hovered_row = None;
+            }
+            if d.active {
+                *needs_rebuild = true;
+                self.needs_rebuild = true;
+                return;
+            }
         }
         if let Some((p, _)) = self.picker.as_mut() {
             // The open picker has the pointer: its own hover, none beneath.
@@ -1063,6 +1159,31 @@ impl Application for ListApp {
             return None;
         }
 
+        // The end of a press on a list item: a drag drops the item in its
+        // new place; a press that never moved ticks it.
+        if button == MouseButton::Left && state == ElementState::Released {
+            if let Some(d) = self.row_drag.take() {
+                if d.active {
+                    let (from, slot) = (d.from, self.drop_slot(py));
+                    if slot != from && slot != from + 1 {
+                        if let Some(list) = self.lists.get_mut(self.cur) {
+                            cce_list::move_item(list, from, if slot > from { slot - 1 } else { slot });
+                            self.save_current_list();
+                        }
+                    }
+                } else if let Some(item) = self.lists.get_mut(self.cur).and_then(|l| l.items.get_mut(d.from)) {
+                    item.done = !item.done;
+                    // A custom status (`[/]`, `[-]`) does not survive a
+                    // tick by hand: it reads `x` or ` ` from now on.
+                    item.mark = None;
+                    self.save_current_list();
+                }
+                self.hovered_row = self.row_at(px, py);
+                self.needs_rebuild = true;
+                *needs_rebuild = true;
+                return None;
+            }
+        }
         if button == MouseButton::Left && state == ElementState::Pressed {
             if let Some(i) = self.row_at(px, py) {
                 // A press in a task's date zone opens the picker, in a list
@@ -1104,15 +1225,12 @@ impl Application for ListApp {
                         cce_list::remove_item(list, i);
                         self.clamp_scroll();
                         self.hovered_row = self.row_at(px, py);
+                        self.save_current_list();
                     } else {
-                        let item = &mut list.items[i];
-                        item.done = !item.done;
-                        // A custom status (`[/]`, `[-]`) does not survive a
-                        // tick by hand: it reads `x` or ` ` from now on.
-                        item.mark = None;
+                        // A drag, or on release a tick.
+                        self.row_drag = Some(RowDrag { from: i, start: (px, py), at: (px, py), active: false });
                     }
                 }
-                self.save_current_list();
                 self.needs_rebuild = true;
                 *needs_rebuild = true;
                 return None;
@@ -1183,6 +1301,14 @@ impl Application for ListApp {
                     self.needs_rebuild = true;
                     *needs_rebuild = true;
                 }
+            }
+            return None;
+        }
+        if self.row_drag.as_ref().is_some_and(|d| d.active) {
+            if event.state == ElementState::Pressed && event.logical_key == Key::Named(NamedKey::Escape) {
+                self.row_drag = None;
+                self.needs_rebuild = true;
+                *needs_rebuild = true;
             }
             return None;
         }
