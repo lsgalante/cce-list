@@ -419,16 +419,6 @@ dependencies = [
 [[package]]
 name = "cce-core"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-core.git?rev=0adfe0bb400d4ac7e85f4ab36145dda3f346fcd4#0adfe0bb400d4ac7e85f4ab36145dda3f346fcd4"
-dependencies = [
- "libc",
- "log",
- "web-time",
-]
-
-[[package]]
-name = "cce-core"
-version = "0.1.0"
 source = "git+https://github.com/lsgalante/cce-core.git?rev=27a2567b217312898a5de44ce430533d9870b4e4#27a2567b217312898a5de44ce430533d9870b4e4"
 dependencies = [
  "fluent-bundle",
@@ -437,6 +427,16 @@ dependencies = [
  "log",
  "serde_json",
  "unic-langid",
+ "web-time",
+]
+
+[[package]]
+name = "cce-core"
+version = "0.1.0"
+source = "git+https://github.com/lsgalante/cce-core.git?rev=6a542c18ee31a20cfa3ecaa9da71ffa1d995af04#6a542c18ee31a20cfa3ecaa9da71ffa1d995af04"
+dependencies = [
+ "libc",
+ "log",
  "web-time",
 ]
 
@@ -502,9 +502,9 @@ dependencies = [
 [[package]]
 name = "cce-vault"
 version = "0.1.0"
-source = "git+https://github.com/lsgalante/cce-vault.git?rev=62c26047bfaeca6cf1e98141843eda37ed06bb40#62c26047bfaeca6cf1e98141843eda37ed06bb40"
+source = "git+https://github.com/lsgalante/cce-vault.git?rev=3a7348a77ea6381d63b7358d14baf155637a7e38#3a7348a77ea6381d63b7358d14baf155637a7e38"
 dependencies = [
- "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=0adfe0bb400d4ac7e85f4ab36145dda3f346fcd4)",
+ "cce-core 0.1.0 (git+https://github.com/lsgalante/cce-core.git?rev=6a542c18ee31a20cfa3ecaa9da71ffa1d995af04)",
  "chrono",
  "indexmap",
  "kdl",
