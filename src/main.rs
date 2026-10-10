@@ -1188,15 +1188,13 @@ impl Application for ListApp {
         }
         let ev = Event::KeyInput(event.clone());
         // An open menu takes the keyboard: arrows move, Enter picks.
-        if self.ui_context[self.switcher].open {
-            if self.ui_context.propagate_event(&ev, self.switcher.id()) {
-                if self.ui_context[self.switcher].take_change() {
-                    self.switcher_picked();
-                }
-                *needs_rebuild = true;
-                self.needs_rebuild = true;
-                return None;
+        if self.ui_context[self.switcher].open && self.ui_context.propagate_event(&ev, self.switcher.id()) {
+            if self.ui_context[self.switcher].take_change() {
+                self.switcher_picked();
             }
+            *needs_rebuild = true;
+            self.needs_rebuild = true;
+            return None;
         }
         if event.state == ElementState::Pressed && !event.repeat {
             if event.ctrl {
