@@ -12,7 +12,6 @@
 //! changed paths, and `poll` applies them on the app's loop.
 
 use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -165,45 +164,14 @@ impl VaultTasks {
         Ok(path)
     }
 
-    /// Show a note in cce-notes: hand it to the running instance over its
-    /// socket, or start one. On a thread of its own, and bounded: this is
-    /// called from a click on the UI thread, and a cce-notes that took the
-    /// connection but never answered froze the list (cce-grid hit the same).
+    /// Show a note in cce-notes: hand it to the running instance, or start
+    /// one. `notes_ipc::open` does it on a thread of its own, bounded: this
+    /// is called from a click on the UI thread, and a cce-notes that took
+    /// the connection but never answered froze the list.
     pub fn open_note(&self, path: &str) {
         let abs = self.index.abs(path);
-        let sock = cce_ui::ipc::socket_path("cce-notes");
-        std::thread::spawn(move || open_in_notes_at(&sock, &abs));
+        cce_vault::notes_ipc::open(&abs, None, |e| log::warn!("[vault-tasks] {e}"));
     }
-}
-
-/// How long cce-notes may take to take or answer an `open`.
-const NOTES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-fn open_in_notes_at(sock: &str, abs: &std::path::Path) {
-    if let Ok(mut s) = std::os::unix::net::UnixStream::connect(sock) {
-        let _ = s.set_read_timeout(Some(NOTES_TIMEOUT));
-        let _ = s.set_write_timeout(Some(NOTES_TIMEOUT));
-        if s.write_all(format!("open {}\n", abs.display()).as_bytes()).is_ok() {
-            let mut reply = String::new();
-            let _ = BufReader::new(s).read_line(&mut reply);
-            return;
-        }
-    }
-    let mut notes = std::process::Command::new("cce-notes");
-    notes.arg("open").arg(abs);
-    let _ = spawn_detached(notes);
-}
-
-/// Spawn `cmd` and reap it on a background thread, so the child never lingers
-/// as a zombie once it exits. The same helper cce-mail, cce-files, cce-terminal
-/// and cce-system-interface each keep; cce-ui's shared `process::spawn_detached`
-/// went away in cce-ui 4e94236.
-fn spawn_detached(mut cmd: std::process::Command) -> std::io::Result<()> {
-    let mut child = cmd.spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }
 
 #[cfg(test)]
