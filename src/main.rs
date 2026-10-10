@@ -171,7 +171,7 @@ fn metrics(width: f32) -> Metrics {
 }
 
 fn srgb_u8(linear: [f32; 4]) -> [u8; 3] {
-    let srgb = cce_ui::colors::to_srgb(linear);
+    let srgb = cce_ui::color::to_srgb(linear);
     [
         (srgb[0] * 255.0) as u8,
         (srgb[1] * 255.0) as u8,
@@ -885,7 +885,7 @@ impl Application for ListApp {
                     r.x,
                     cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0),
                     font_size,
-                    srgb_u8(cce_ui::colors::TEXT_DIM),
+                    srgb_u8(cce_ui::color::TEXT_DIM),
                     Some(family.clone()),
                     None,
                 );
@@ -902,7 +902,7 @@ impl Application for ListApp {
                 }
                 if item.header {
                     // A vault note's name: a click opens it in cce-notes.
-                    let color = if hovered { cce_ui::colors::TEXT_FG } else { cce_ui::colors::TEXT_DIM };
+                    let color = if hovered { cce_ui::color::TEXT_FG } else { cce_ui::color::TEXT_DIM };
                     let size = (font_size * 0.9).round();
                     pc.text_with(
                         item.text.clone(),
@@ -919,9 +919,9 @@ impl Application for ListApp {
                 cce_ui::widget::Checkbox::paint_inline(pc, cx, cy, CHECK_R, item.done);
                 let dragged = self.row_drag.as_ref().is_some_and(|d| d.active && d.from == i);
                 let color = if item.done || dragged {
-                    cce_ui::colors::TEXT_DIM
+                    cce_ui::color::TEXT_DIM
                 } else {
-                    cce_ui::colors::TEXT_FG
+                    cce_ui::color::TEXT_FG
                 };
                 let text_x = cx + CHECK_R + 8.0;
                 // The delete zone and the calendar glyph's slot bound the label
@@ -941,7 +941,7 @@ impl Application for ListApp {
                         width: side,
                         height: side,
                     };
-                    pc.icon("calendar", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
+                    pc.icon("calendar", glyph, cce_ui::color::to_srgb(cce_ui::color::TEXT_DIM));
                 }
                 if let Some(due) = item.due {
                     // The date, right-aligned against the glyph slot, in a
@@ -949,7 +949,7 @@ impl Application for ListApp {
                     let label = cce_list::due_label(due, today);
                     let size = due_size(font_size);
                     let lw = cce_ui::widget::display::measure_text_width(&label, &family, size);
-                    let color = if !item.done && due < today { OVERDUE } else { cce_ui::colors::TEXT_DIM };
+                    let color = if !item.done && due < today { OVERDUE } else { cce_ui::color::TEXT_DIM };
                     if !covered {
                         pc.text_with(
                             label,
@@ -986,7 +986,7 @@ impl Application for ListApp {
                         text_x + strike_w,
                         cy,
                         1.0,
-                        cce_ui::colors::TEXT_DIM,
+                        cce_ui::color::TEXT_DIM,
                         Cap::Flat,
                     );
                 }
@@ -1000,13 +1000,13 @@ impl Application for ListApp {
                         width: side,
                         height: side,
                     };
-                    pc.icon("x", glyph, cce_ui::colors::to_srgb(cce_ui::colors::TEXT_DIM));
+                    pc.icon("x", glyph, cce_ui::color::to_srgb(cce_ui::color::TEXT_DIM));
                 }
             }
             // Where a drag would drop: a line in the gap between rows.
             if let Some((_, slot)) = self.active_drop() {
                 let r = self.row_rect(&m, slot);
-                let accent = cce_ui::colors::highlight_primary_color();
+                let accent = cce_ui::color::highlight_primary_color();
                 pc.rounded_rect(Rect { x: r.x, y: r.y - 1.0, width: r.width, height: 2.0 }, 1.0,
                     (true, true, true, true), accent);
             }
@@ -1022,7 +1022,7 @@ impl Application for ListApp {
                 let w = (cce_ui::widget::display::measure_text_width(&rv.text, &family, font_size) + 16.0)
                     .min(self.width as f32 - x - m.pad);
                 let r = Rect { x, y, width: w.max(0.0), height: ROW_H };
-                let accent = cce_ui::colors::highlight_primary_color();
+                let accent = cce_ui::color::highlight_primary_color();
                 pc.rounded_rect(r, 6.0, (true, true, true, true), [accent[0], accent[1], accent[2], 0.85]);
                 pc.text_with(rv.text.clone(), r.x + 8.0, cce_ui::layout::align_text_y(r.y, r.height, font_size, 0.0),
                     font_size, [255, 255, 255], Some(family.clone()), Some([r.x, r.y, r.x + r.width - 4.0, r.y + r.height]));
