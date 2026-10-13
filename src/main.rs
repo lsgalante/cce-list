@@ -36,7 +36,7 @@ use cce_ui::scene::layout::Rect;
 use cce_ui::scene::paint::{Cap, DisplayList, PaintCtx};
 use cce_ui::widget::{
     Adapted, Bounds, Dropdown, ElementState, Event, Key, KeyEvent, MouseButton, MouseScrollDelta,
-    NamedKey, ScrollMotion, TextBox, WidgetHost,
+    NamedKey, ScrollMotion, TextBox, WidgetEvent, WidgetHost,
 };
 
 /// Initial size only — the window is freely resizable and the compositor
@@ -459,6 +459,20 @@ impl ListApp {
         self.ui_context[self.switcher].options = self.switcher_options();
         let idx = self.cur.min(self.lists.len().saturating_sub(1));
         self.select_list(idx);
+    }
+
+    /// Act on what the widgets reported since the last sweep
+    /// (`UiContext::take_events`): the switcher's pick. Run where the
+    /// switcher took an event — a press or, while open, a key — the only
+    /// ways it is picked from; the input box's own reports are not used
+    /// (Enter reads its text).
+    fn drain_widget_events(&mut self) {
+        for (id, ev) in self.ui_context.take_events() {
+            match ev {
+                WidgetEvent::Changed if id == self.switcher.id() => self.switcher_picked(),
+                _ => {}
+            }
+        }
     }
 
     /// The switcher reported a pick: a list, or one of the two actions.
@@ -1153,9 +1167,7 @@ impl Application for ListApp {
         // The switcher routes first: its open menu overlays the rows, so a
         // press it handles must not fall through to what is beneath.
         if self.ui_context.propagate_event(&ev, self.switcher.id()) {
-            if self.ui_context[self.switcher].take_change() {
-                self.switcher_picked();
-            }
+            self.drain_widget_events();
             *needs_rebuild = true;
             self.needs_rebuild = true;
             return None;
@@ -1328,9 +1340,7 @@ impl Application for ListApp {
         let ev = Event::KeyInput(event.clone());
         // An open menu takes the keyboard: arrows move, Enter picks.
         if self.ui_context[self.switcher].open && self.ui_context.propagate_event(&ev, self.switcher.id()) {
-            if self.ui_context[self.switcher].take_change() {
-                self.switcher_picked();
-            }
+            self.drain_widget_events();
             *needs_rebuild = true;
             self.needs_rebuild = true;
             return None;
